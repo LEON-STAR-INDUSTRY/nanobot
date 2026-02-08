@@ -3,8 +3,10 @@
 import asyncio
 import json
 import re
+import subprocess
 import threading
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -22,6 +24,7 @@ try:
         CreateMessageReactionRequest,
         CreateMessageReactionRequestBody,
         Emoji,
+        GetMessageResourceRequest,
         P2ImMessageReceiveV1,
     )
     FEISHU_AVAILABLE = True
@@ -157,6 +160,108 @@ class FeishuChannel(BaseChannel):
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._add_reaction_sync, message_id, emoji_type)
     
+    def _download_file_sync(self, file_key: str, message_id: str) -> str | None:
+        """
+        Download a message resource from Feishu using message_id and file_key (sync).
+        
+        Uses the 'get message resource' API:
+        GET /open-apis/im/v1/messages/{message_id}/resources/{file_key}?type=file
+        
+        Returns:
+            Path to the downloaded file, or None on failure.
+        """
+        try:
+            request = GetMessageResourceRequest.builder() \
+                .message_id(message_id) \
+                .file_key(file_key) \
+                .type("file") \
+                .build()
+            response = self._client.im.v1.message_resource.get(request)
+            
+            if not response.success():
+                logger.error(
+                    f"Failed to download Feishu file: code={response.code}, "
+                    f"msg={response.msg}"
+                )
+                return None
+            
+            # Save to temp file
+            media_dir = Path.home() / ".nanobot" / "media"
+            media_dir.mkdir(parents=True, exist_ok=True)
+            
+            file_name = response.file_name or f"{file_key}.opus"
+            file_path = media_dir / file_name
+            
+            with open(file_path, "wb") as f:
+                f.write(response.file.read())
+            
+            logger.info(f"Downloaded Feishu audio file to {file_path}")
+            return str(file_path)
+            
+        except Exception as e:
+            logger.error(f"Error downloading Feishu file: {e}")
+            return None
+    
+    def _transcribe_audio_sync(self, audio_path: str) -> str | None:
+        """
+        Transcribe audio file using the speech-recognition skill script (sync).
+        
+        Returns:
+            Transcribed text, or None on failure.
+        """
+        try:
+            script_path = Path(__file__).parent.parent / "skills" / "speech-recognition" / "scripts" / "transcribe.py"
+            if not script_path.exists():
+                logger.warning(f"Transcribe script not found: {script_path}")
+                return None
+            
+            result = subprocess.run(
+                ["python", str(script_path), "-j", audio_path],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            
+            if result.returncode != 0:
+                logger.error(f"Transcription failed: {result.stderr}")
+                return None
+            
+            data = json.loads(result.stdout)
+            if data.get("success") and data.get("text"):
+                logger.info(f"Transcribed audio: {data['text'][:50]}...")
+                return data["text"]
+            elif data.get("error"):
+                logger.warning(f"Transcription error: {data['error']}")
+                return None
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error transcribing audio: {e}")
+            return None
+    
+    async def _download_and_transcribe(self, file_key: str, message_id: str) -> str | None:
+        """
+        Download audio from Feishu and transcribe it (async wrapper).
+        
+        Returns:
+            Transcribed text, or None on failure.
+        """
+        loop = asyncio.get_running_loop()
+        
+        # Download file
+        audio_path = await loop.run_in_executor(
+            None, self._download_file_sync, file_key, message_id
+        )
+        if not audio_path:
+            return None
+        
+        # Transcribe
+        text = await loop.run_in_executor(
+            None, self._transcribe_audio_sync, audio_path
+        )
+        return text
+    
     # Regex to match markdown tables (header + separator + data rows)
     _TABLE_RE = re.compile(
         r"((?:^[ \t]*\|.+\|[ \t]*\n)(?:^[ \t]*\|[-:\s|]+\|[ \t]*\n)(?:^[ \t]*\|.+\|[ \t]*\n?)+)",
@@ -284,6 +389,24 @@ class FeishuChannel(BaseChannel):
                     content = json.loads(message.content).get("text", "")
                 except json.JSONDecodeError:
                     content = message.content or ""
+            elif msg_type == "audio":
+                # Handle audio messages: download and transcribe
+                try:
+                    audio_content = json.loads(message.content)
+                    file_key = audio_content.get("file_key")
+                    duration = audio_content.get("duration", 0)
+                    logger.info(f"Received audio message: file_key={file_key}, duration={duration}ms")
+                    
+                    if file_key:
+                        transcription = await self._download_and_transcribe(file_key, message_id)
+                        if transcription:
+                            content = transcription
+                        else:
+                            content = "[audio: transcription failed]"
+                    else:
+                        content = "[audio: no file_key]"
+                except json.JSONDecodeError:
+                    content = "[audio: invalid content]"
             else:
                 content = MSG_TYPE_MAP.get(msg_type, f"[{msg_type}]")
             
