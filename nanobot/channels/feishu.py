@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import subprocess
+import tempfile
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -19,6 +20,8 @@ from nanobot.config.schema import FeishuConfig
 try:
     import lark_oapi as lark
     from lark_oapi.api.im.v1 import (
+        CreateFileRequest,
+        CreateFileRequestBody,
         CreateMessageRequest,
         CreateMessageRequestBody,
         CreateMessageReactionRequest,
@@ -26,6 +29,8 @@ try:
         Emoji,
         GetMessageResourceRequest,
         P2ImMessageReceiveV1,
+        ReplyMessageRequest,
+        ReplyMessageRequestBody,
     )
     FEISHU_AVAILABLE = True
 except ImportError:
@@ -64,6 +69,7 @@ class FeishuChannel(BaseChannel):
         self._ws_thread: threading.Thread | None = None
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()  # Ordered dedup cache
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._voice_reply_chats: dict[str, str] = {}  # chat_id -> message_id for voice reply
     
     async def start(self) -> None:
         """Start the Feishu bot with WebSocket long connection."""
@@ -262,6 +268,146 @@ class FeishuChannel(BaseChannel):
         )
         return text
     
+    def _tts_sync(self, text: str) -> str | None:
+        """
+        Convert text to speech using the TTS skill script (sync).
+        
+        Returns:
+            Path to the generated MP3 file, or None on failure.
+        """
+        try:
+            script_path = Path(__file__).parent.parent / "skills" / "tts" / "scripts" / "tts.py"
+            if not script_path.exists():
+                logger.warning(f"TTS script not found: {script_path}")
+                return None
+            
+            # Create output path
+            media_dir = Path.home() / ".nanobot" / "media"
+            media_dir.mkdir(parents=True, exist_ok=True)
+            
+            output_path = str(media_dir / f"tts_{next(tempfile._get_candidate_names())}.mp3")
+            
+            result = subprocess.run(
+                ["python", str(script_path), "-j", "-o", output_path, text],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            
+            if result.returncode != 0:
+                logger.error(f"TTS failed: {result.stderr}")
+                return None
+            
+            data = json.loads(result.stdout)
+            if data.get("success") and data.get("file"):
+                logger.info(f"TTS generated: {data['file']} ({data.get('size', 0)} bytes)")
+                return data["file"]
+            elif data.get("error"):
+                logger.warning(f"TTS error: {data['error']}")
+                return None
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error in TTS: {e}")
+            return None
+    
+    def _upload_audio_sync(self, file_path: str) -> str | None:
+        """
+        Upload an audio file to Feishu and get file_key (sync).
+        
+        Uses: POST /open-apis/im/v1/files
+        
+        Returns:
+            file_key string, or None on failure.
+        """
+        try:
+            with open(file_path, "rb") as f:
+                request = CreateFileRequest.builder() \
+                    .request_body(
+                        CreateFileRequestBody.builder()
+                        .file_type("opus")
+                        .file_name("voice_reply.mp3")
+                        .file(f)
+                        .build()
+                    ).build()
+                
+                response = self._client.im.v1.file.create(request)
+            
+            if not response.success():
+                logger.error(
+                    f"Failed to upload audio to Feishu: code={response.code}, "
+                    f"msg={response.msg}"
+                )
+                return None
+            
+            file_key = response.data.file_key
+            logger.info(f"Uploaded audio to Feishu: file_key={file_key}")
+            return file_key
+            
+        except Exception as e:
+            logger.error(f"Error uploading audio to Feishu: {e}")
+            return None
+    
+    def _reply_audio_sync(self, message_id: str, file_key: str) -> bool:
+        """
+        Reply to a message with an audio file (sync).
+        
+        Uses: POST /open-apis/im/v1/messages/{message_id}/reply
+        
+        Returns:
+            True on success, False on failure.
+        """
+        try:
+            content = json.dumps({"file_key": file_key})
+            request = ReplyMessageRequest.builder() \
+                .message_id(message_id) \
+                .request_body(
+                    ReplyMessageRequestBody.builder()
+                    .msg_type("audio")
+                    .content(content)
+                    .build()
+                ).build()
+            
+            response = self._client.im.v1.message.reply(request)
+            
+            if not response.success():
+                logger.error(
+                    f"Failed to reply with audio: code={response.code}, "
+                    f"msg={response.msg}"
+                )
+                return False
+            
+            logger.info(f"Replied with audio to message {message_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error replying with audio: {e}")
+            return False
+    
+    async def _send_voice_reply(self, text: str, message_id: str) -> None:
+        """
+        Generate TTS audio and send as voice reply to a Feishu message.
+        
+        Full flow: TTS -> upload -> reply with audio.
+        """
+        loop = asyncio.get_running_loop()
+        
+        # Step 1: TTS
+        audio_path = await loop.run_in_executor(None, self._tts_sync, text)
+        if not audio_path:
+            logger.warning("Voice reply skipped: TTS failed")
+            return
+        
+        # Step 2: Upload to Feishu
+        file_key = await loop.run_in_executor(None, self._upload_audio_sync, audio_path)
+        if not file_key:
+            logger.warning("Voice reply skipped: upload failed")
+            return
+        
+        # Step 3: Reply with audio
+        await loop.run_in_executor(None, self._reply_audio_sync, message_id, file_key)
+    
     # Regex to match markdown tables (header + separator + data rows)
     _TABLE_RE = re.compile(
         r"((?:^[ \t]*\|.+\|[ \t]*\n)(?:^[ \t]*\|[-:\s|]+\|[ \t]*\n)(?:^[ \t]*\|.+\|[ \t]*\n?)+)",
@@ -342,6 +488,15 @@ class FeishuChannel(BaseChannel):
             else:
                 logger.debug(f"Feishu message sent to {msg.chat_id}")
                 
+                # Check if voice reply is needed for this chat
+                original_message_id = self._voice_reply_chats.pop(msg.chat_id, None)
+                if original_message_id:
+                    logger.info(f"Sending voice reply for chat {msg.chat_id}")
+                    try:
+                        await self._send_voice_reply(msg.content, original_message_id)
+                    except Exception as ve:
+                        logger.warning(f"Voice reply failed (non-fatal): {ve}")
+                
         except Exception as e:
             logger.error(f"Error sending Feishu message: {e}")
     
@@ -401,6 +556,9 @@ class FeishuChannel(BaseChannel):
                         transcription = await self._download_and_transcribe(file_key, message_id)
                         if transcription:
                             content = transcription
+                            # Mark this chat for voice reply
+                            reply_to_id = chat_id if chat_type == "group" else sender_id
+                            self._voice_reply_chats[reply_to_id] = message_id
                         else:
                             content = "[audio: transcription failed]"
                     else:
