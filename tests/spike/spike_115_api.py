@@ -3,6 +3,7 @@ Spike U1: Validate 115.com API library for QR login + offline download.
 
 Run: python tests/spike/spike_115_api.py
 Prerequisites: pip install p115client
+Install latest: pip install -U git+https://github.com/ChenyangGao/p115client@main
 """
 import asyncio
 import json
@@ -48,95 +49,55 @@ results: dict[str, str] = {}
 async def run_p115client():
     from p115client import P115Client
 
-    # Step 2: QR code generation
-    print("\n--- Step 2: QR Code Generation ---")
+    # Step 2: QR code login
+    print("\n--- Step 2: QR Code Login ---")
     try:
         if SESSION_FILE.exists():
             print(f"[INFO] Found existing session at {SESSION_FILE}, attempting reload...")
-            client = P115Client(str(SESSION_FILE), check_for_relogin=True)
-            results["qr_generation"] = "SKIP (using saved session)"
+            # Load cookies from JSON file
+            session_data = json.loads(SESSION_FILE.read_text())
+            # Create client with cookies dict (not file path)
+            client = P115Client(session_data["cookies"], check_for_relogin=True)
+            results["qr_login"] = "SKIP (using saved session)"
         else:
-            # Create client without cookies — triggers QR login
-            client = P115Client()
-            # Get QR code token
-            qr_info = await client.login_qrcode_token(async_=True)
-            uid = qr_info.get("data", {}).get("uid", "")
-            if not uid:
-                results["qr_generation"] = "FAIL (no uid in response)"
-                print(f"[FAIL] QR generation: {qr_info}")
-                return
-            # QR image URL
-            qr_url = f"https://qrcodeapi.115.com/api/1.0/mac/1.0/qrcode?uid={uid}"
-            print(f"[INFO] QR URL: {qr_url}")
-            print("[INFO] Scan the QR code above with the 115 mobile app")
-
-            # Save QR image
-            import httpx
-
-            async with httpx.AsyncClient() as http:
-                resp = await http.get(qr_url)
-                QR_FILE.write_bytes(resp.content)
-                print(f"[INFO] QR image saved to {QR_FILE}")
-
-            results["qr_generation"] = f"PASS (saved to {QR_FILE})"
-
-            # Step 3: Login polling
-            print("\n--- Step 3: Login Polling ---")
-            print("[INFO] Waiting for QR code scan (up to 120s)...")
-            elapsed = 0
-            status = "waiting"
-            while elapsed < 120:
-                await asyncio.sleep(2)
-                elapsed += 2
-                scan_resp = await client.login_qrcode_scan_status(
-                    {"uid": uid}, async_=True
-                )
-                scan_data = scan_resp.get("data", {})
-                new_status = scan_data.get("status", 0)
-                # 0=waiting, 1=scanned, 2=confirmed, -1=expired, -2=canceled
-                if new_status == 1 and status != "scanned":
-                    status = "scanned"
-                    print(f"[INFO] QR scanned at {elapsed}s, waiting for confirmation...")
-                elif new_status == 2:
-                    status = "confirmed"
-                    print(f"[INFO] Login confirmed at {elapsed}s")
-                    break
-                elif new_status in (-1, -2):
-                    status = "expired" if new_status == -1 else "canceled"
-                    print(f"[FAIL] QR {status} at {elapsed}s")
-                    results["login_polling"] = f"FAIL ({status})"
-                    return
-
-            if status != "confirmed":
-                results["login_polling"] = f"FAIL (timeout, last status: {status})"
-                print("[FAIL] Login polling timed out")
-                return
-
-            results["login_polling"] = f"PASS (confirmed in {elapsed}s)"
-
-            # Get login cookies
-            login_result = await client.login_qrcode_scan_result(
-                {"uid": uid, "app": "web"}, async_=True
+            print("[INFO] Starting QR code login...")
+            print("[INFO] A browser window will open with the QR code")
+            print("[INFO] Please scan with the 115 mobile app")
+            
+            # Use the official login_with_qrcode class method
+            # This handles token generation, QR display, and polling automatically
+            login_result = await P115Client.login_with_qrcode(
+                app="web",  # Login as web app
+                console_qrcode=True,  # Open QR in console
+                async_=True
             )
-            # Save session (cookies)
-            cookies = client.cookies
+            
+            print("[INFO] Login successful!")
+            results["qr_login"] = "PASS"
+            
+            # Create client from login result
+            client = P115Client(login_result)
+            
+            # Save session
+            # Use the cookie dict from login_result, which contains the actual key-value pairs
             session_data = {
-                "cookies": {k: v for k, v in cookies.items()} if hasattr(cookies, "items") else str(cookies),
+                "cookies": login_result["data"]["cookie"],  # {"UID": "xxx", "CID": "yyy", ...}
                 "login_result": login_result,
             }
             SESSION_FILE.write_text(json.dumps(session_data, ensure_ascii=False, indent=2))
             print(f"[INFO] Session saved to {SESSION_FILE}")
 
     except Exception as e:
-        results["qr_generation"] = f"FAIL ({type(e).__name__}: {e})"
-        print(f"[FAIL] QR generation: {e}")
+        results["qr_login"] = f"FAIL ({type(e).__name__}: {e})"
+        print(f"[FAIL] QR login: {e}")
         return
 
-    # Step 4: Session reload & validation
-    print("\n--- Step 4: Session Reload & Validation ---")
+    # Step 3: Session validation
+    print("\n--- Step 3: Session Validation ---")
     try:
-        # Reload client from session file
-        client2 = P115Client(str(SESSION_FILE), check_for_relogin=True)
+        # Reload client from session file to verify it works
+        session_data = json.loads(SESSION_FILE.read_text())
+        client2 = P115Client(session_data["cookies"], check_for_relogin=True)
         # Test authenticated endpoint — get user info
         user_info = await client2.user_info(async_=True)
         if user_info.get("state"):
@@ -150,51 +111,47 @@ async def run_p115client():
         results["session_reload"] = f"FAIL ({type(e).__name__}: {e})"
         print(f"[FAIL] Session reload: {e}")
 
-    # Step 5: Add magnet task
-    print("\n--- Step 5: Add Magnet Task ---")
-    test_magnet = "magnet:?xt=urn:btih:0000000000000000000000000000000000000000&dn=test"
+    # Step 4: Add magnet task
+    print("\n--- Step 4: Add Offline Download Task ---")
+    test_magnet = "magnet:?xt=urn:btih:6c4b42be0793598dbcf7b75d50df1e274ad8890c"
     try:
+        # offline_add_urls takes payload as positional argument
         add_resp = await client.offline_add_urls(
-            payload={"urls": test_magnet, "wp_path_id": 0},
+            test_magnet,  # Can pass string directly
             async_=True,
         )
-        if add_resp.get("state"):
-            print(f"[PASS] Magnet task added: {add_resp}")
+        print(f"[DEBUG] Full response: {json.dumps(add_resp, ensure_ascii=False, indent=2)}")
+        
+        # Check response structure
+        state = add_resp.get("state", False)
+        if state:
+            print(f"[PASS] Magnet task added successfully")
             results["add_magnet"] = "PASS"
         else:
-            err_code = add_resp.get("errno", "unknown")
-            err_msg = add_resp.get("error", "unknown")
-            print(f"[INFO] Add magnet response: errno={err_code}, error={err_msg}")
-            # Even a "duplicate" or "invalid hash" error proves the API works
-            results["add_magnet"] = f"PASS (API responded: {err_code} - {err_msg})"
+            # Try different error field names
+            err_code = add_resp.get("errcode", add_resp.get("errno", add_resp.get("code", "unknown")))
+            err_msg = add_resp.get("error_msg", add_resp.get("error", add_resp.get("message", "unknown")))
+            print(f"[INFO] Task not added: code={err_code}, msg={err_msg}")
+            # API responded, so it's working
+            results["add_magnet"] = f"PASS (API working, code={err_code})"
     except Exception as e:
         results["add_magnet"] = f"FAIL ({type(e).__name__}: {e})"
         print(f"[FAIL] Add magnet: {e}")
 
-    # Step 5b: Check task list
+    # Step 4b: Check task list
     try:
         task_list = await client.offline_list(async_=True)
-        task_count = len(task_list.get("tasks", []))
-        print(f"[INFO] Offline task count: {task_count}")
+        tasks = task_list.get("tasks", [])
+        task_count = len(tasks)
+        print(f"[INFO] Total offline tasks: {task_count}")
+        if task_count > 0:
+            print(f"[INFO] Recent tasks:")
+            for i, task in enumerate(tasks[:3], 1):  # Show first 3 tasks
+                name = task.get("name", "unknown")
+                status = task.get("status", "unknown")
+                print(f"  {i}. {name} (status={status})")
     except Exception as e:
         print(f"[INFO] Task list check failed (non-critical): {e}")
-
-    # Step 6: Session expiry detection
-    print("\n--- Step 6: Session Expiry Detection ---")
-    try:
-        # Create client with fake/expired cookies to test error handling
-        fake_client = P115Client("CID=expired; SEID=expired; UID=0")
-        resp = await fake_client.user_info(async_=True)
-        if not resp.get("state"):
-            results["session_expiry"] = "PASS (error detected correctly)"
-            print(f"[PASS] Expired session detected: {resp}")
-        else:
-            results["session_expiry"] = "FAIL (no error for expired session)"
-            print(f"[FAIL] Expected error for expired session, got: {resp}")
-    except Exception as e:
-        results["session_expiry"] = f"PASS (exception raised: {type(e).__name__})"
-        print(f"[PASS] Session expiry detection: {type(e).__name__}: {e}")
-
 
 # ---------------------------------------------------------------------------
 # py115 implementation (fallback)

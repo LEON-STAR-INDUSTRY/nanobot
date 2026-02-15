@@ -18,3 +18,6 @@ __pycache__/
 poetry.lock
 .pytest_cache/
 tests/
+
+# 忽略外部项目依赖的源码
+dependencies/
