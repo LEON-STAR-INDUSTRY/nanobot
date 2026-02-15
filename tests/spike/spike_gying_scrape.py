@@ -18,28 +18,36 @@ SCREENSHOTS_DIR.mkdir(exist_ok=True)
 
 results: dict[str, str] = {}
 
-# Known selectors (to be discovered and updated during spike)
-SELECTORS: dict[str, str] = {
-    "search_input": "",
-    "result_items": "",
-    "detail_title": "",
-    "detail_rating": "",
-    "detail_genres": "",
-    "detail_actors": "",
-    "detail_synopsis": "",
-    "detail_poster": "",
-    "download_section": "",
-    "download_rows": "",
-    "magnet_link": "",
-    "listing_items": "",
-    "listing_title": "",
-    "listing_url": "",
-    "listing_rating": "",
+# Selectors discovered from HTML analysis
+SEL = {
+    # Search results page
+    "search_input": 'input[type="search"]',
+    "result_items": ".sr_lists .v5d",
+    "result_title": ".text b a.d16",
+    "result_rating_text": ".text p",
+    # Detail page
+    "detail_title": ".main-ui-meta h1 div",
+    "detail_year": ".main-ui-meta h1 span.year",
+    "detail_rating": ".ratings-section .freshness",
+    "detail_genres": '.main-ui-meta a[href*="genre="]',
+    "detail_actors": '.main-ui-meta a[href*="/s/2---1/"]',
+    "detail_synopsis": ".movie-introduce .zkjj_a",
+    "detail_poster": ".main-meta .img img",
+    # Download section
+    "download_section": "div#down",
+    "download_quality_tabs": ".down-link .nav-tabs li",
+    "download_rows": "table.bit_list tbody tr",
+    "magnet_link": 'a.torrent[href^="magnet:"]',
+    # Homepage listing
+    "listing_items": "ul.content-list li",
+    "listing_title": ".li-bottom h3 a",
+    "listing_rating": ".li-bottom h3 span",
+    "listing_tag": ".li-bottom div.tag",
+    "listing_movie_link": 'a[href^="/mv/"]',
 }
 
 
 async def main():
-    # Step 1: Check Playwright is installed
     try:
         from playwright.async_api import async_playwright
     except ImportError:
@@ -51,36 +59,28 @@ async def main():
     except ImportError:
         stealth_async = None
         print("[WARN] playwright-stealth not installed. Anti-detection may fail.")
-        print("[WARN] Install: pip install playwright-stealth")
 
     print("[INFO] Playwright available")
 
     async with async_playwright() as p:
-        # Step 2: Launch browser with stealth
-        print("\n--- Step 2: Browser Launch + Stealth ---")
+        # --- Step 1: Launch browser ---
+        print("\n--- Step 1: Browser Launch + Stealth ---")
         try:
             browser = await p.chromium.launch_persistent_context(
                 user_data_dir=str(BROWSER_DATA),
-                headless=False,  # Use headed mode for initial spike (need to see what happens)
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                ],
+                headless=False,
+                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
                 locale="zh-CN",
                 viewport={"width": 1280, "height": 800},
             )
             page = browser.pages[0] if browser.pages else await browser.new_page()
-
-            # Apply stealth if available
             if stealth_async:
                 await stealth_async(page)
             else:
-                # Manual anti-detection
                 await page.add_init_script("""
                     Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
                     window.chrome = {runtime: {}};
                 """)
-
             results["browser_launch"] = "PASS"
             print("[PASS] Browser launched with stealth")
         except Exception as e:
@@ -88,13 +88,11 @@ async def main():
             print(f"[FAIL] Browser launch: {e}")
             return
 
-        # Step 2b: Navigate to gying.org
-        print("\n--- Step 2b: Navigate to gying.org ---")
+        # --- Step 2: Navigate to homepage ---
+        print("\n--- Step 2: Navigate to gying.org ---")
         try:
             await page.goto("https://www.gying.org/", wait_until="networkidle", timeout=30000)
             await page.screenshot(path=str(SCREENSHOTS_DIR / "01_homepage.png"))
-
-            # Check if page rendered
             content = await page.content()
             if len(content) > 500:
                 results["page_render"] = "PASS"
@@ -103,337 +101,256 @@ async def main():
                 results["page_render"] = f"FAIL (only {len(content)} chars)"
                 print(f"[FAIL] Page too short: {len(content)} chars")
 
-            # Detect: login page, Cloudflare challenge, or content
             page_text = await page.inner_text("body")
             if "cloudflare" in page_text.lower() or "checking your browser" in page_text.lower():
                 print("[WARN] Cloudflare challenge detected — waiting 10s...")
                 await page.wait_for_timeout(10000)
                 await page.screenshot(path=str(SCREENSHOTS_DIR / "01b_after_cf.png"))
-                page_text = await page.inner_text("body")
-
-            if "登录" in page_text and "注册" in page_text and len(page_text) < 500:
-                print("[INFO] Login page detected")
-                results["auth_status"] = "NEEDS_LOGIN"
-            else:
-                print("[INFO] Content page detected (may be logged in or public)")
-                results["auth_status"] = "CONTENT_VISIBLE"
-
         except Exception as e:
             results["page_render"] = f"FAIL ({type(e).__name__}: {e})"
             print(f"[FAIL] Navigation: {e}")
 
-        # Step 3: Investigate login flow
-        print("\n--- Step 3: Login Flow Investigation ---")
+        # --- Step 3: Check auth status ---
+        print("\n--- Step 3: Auth Check ---")
         try:
-            # Check cookies for existing session
             cookies = await browser.cookies()
-            session_cookies = [c for c in cookies if "gying" in c.get("domain", "")]
-            print(f"[INFO] Existing gying cookies: {len(session_cookies)}")
-            for c in session_cookies[:5]:
-                print(f"  - {c['name']}: {c['value'][:20]}...")
-
-            # Look for login-related elements
-            login_btn = await page.query_selector('a[href*="login"], button:has-text("登录")')
-            if login_btn:
-                print("[INFO] Login button found")
-                login_text = await login_btn.inner_text()
-                print(f"[INFO] Login button text: {login_text}")
-            else:
-                print("[INFO] No login button visible (might already be logged in)")
-
-            # Check for user profile element (indicates logged in)
-            user_elem = await page.query_selector(
-                '.user-info, .avatar, [class*="user"], [class*="profile"]'
-            )
+            gying_cookies = [c for c in cookies if "gying" in c.get("domain", "")]
+            print(f"[INFO] gying cookies: {len(gying_cookies)}")
+            user_elem = await page.query_selector('[class*="user"], [class*="profile"]')
             if user_elem:
-                print("[INFO] User profile element found — likely logged in")
                 results["login"] = "PASS (already authenticated)"
+                print("[PASS] Logged in")
             else:
-                print("[INFO] No user profile element — may need to login manually")
-                print("[INFO] If login is needed, use the browser window to log in now...")
-                print("[INFO] Waiting 30s for manual login (if needed)...")
+                print("[INFO] Waiting 30s for manual login if needed...")
                 await page.wait_for_timeout(30000)
-                await page.screenshot(path=str(SCREENSHOTS_DIR / "02_after_login_wait.png"))
-                results["login"] = "MANUAL (check screenshot)"
-
+                results["login"] = "MANUAL (check browser)"
         except Exception as e:
             results["login"] = f"FAIL ({type(e).__name__}: {e})"
-            print(f"[FAIL] Login investigation: {e}")
+            print(f"[FAIL] Auth check: {e}")
 
-        # Step 4: Search
+        # --- Step 4: Search ---
         print("\n--- Step 4: Search ---")
         search_query = "星际穿越"
+        first_result_url = None
         try:
-            # Try common search selectors
-            search_selectors = [
-                'input[type="search"]',
-                'input[placeholder*="搜索"]',
-                'input[placeholder*="search"]',
-                'input[name="q"]',
-                'input[name="search"]',
-                'input[name="keyword"]',
-                ".search-input input",
-                "#search-input",
-                'input[class*="search"]',
-            ]
-            search_input = None
-            for sel in search_selectors:
-                search_input = await page.query_selector(sel)
-                if search_input:
-                    SELECTORS["search_input"] = sel
-                    print(f"[INFO] Search input found: {sel}")
-                    break
-
+            search_input = await page.query_selector(SEL["search_input"])
             if not search_input:
-                # Try finding any visible input
-                all_inputs = await page.query_selector_all("input[type='text'], input:not([type])")
-                if all_inputs:
-                    search_input = all_inputs[0]
-                    SELECTORS["search_input"] = "input (first text input)"
-                    print(f"[INFO] Using first text input as search (found {len(all_inputs)} inputs)")
-
-            if search_input:
+                results["search"] = "FAIL (search input not found)"
+                print("[FAIL] Search input not found")
+            else:
                 await search_input.click()
                 await search_input.fill(search_query)
                 await page.keyboard.press("Enter")
                 await page.wait_for_load_state("networkidle", timeout=15000)
                 await page.screenshot(path=str(SCREENSHOTS_DIR / "03_search_results.png"))
 
-                # Extract results
-                result_selectors = [
-                    ".movie-item",
-                    ".search-result",
-                    ".result-item",
-                    ".item",
-                    'a[href*="movie"]',
-                    'a[href*="detail"]',
-                    ".card",
-                    ".list-item",
-                ]
-                result_items = []
-                for sel in result_selectors:
-                    items = await page.query_selector_all(sel)
-                    if len(items) >= 1:
-                        SELECTORS["result_items"] = sel
-                        result_items = items
-                        print(f"[INFO] Result items found with selector: {sel} ({len(items)} items)")
-                        break
-
-                if result_items:
-                    # Extract info from first few results
-                    search_results = []
-                    for item in result_items[:5]:
-                        title_el = await item.query_selector(
-                            "h2, h3, h4, .title, [class*='title'], a"
-                        )
-                        title = await title_el.inner_text() if title_el else "unknown"
-                        href_el = await item.query_selector("a[href]")
-                        href = await href_el.get_attribute("href") if href_el else ""
-                        search_results.append({"title": title.strip(), "url": href})
-
-                    print(f"[PASS] Search found {len(search_results)} results for '{search_query}'")
-                    for r in search_results:
-                        print(f"  - {r['title']}: {r['url']}")
-                    results["search"] = f"PASS ({len(search_results)} results)"
+                items = await page.query_selector_all(SEL["result_items"])
+                if not items:
+                    results["search"] = "FAIL (no .v5d result items)"
+                    print("[FAIL] No result items found with .sr_lists .v5d")
                 else:
-                    # Dump page content for debugging
-                    page_text = await page.inner_text("body")
-                    print(f"[FAIL] No result items found. Page text preview: {page_text[:300]}")
-                    results["search"] = "FAIL (no result items found)"
-            else:
-                print("[FAIL] No search input found")
-                results["search"] = "FAIL (no search input)"
+                    search_results = []
+                    for item in items[:5]:
+                        title_el = await item.query_selector(SEL["result_title"])
+                        title = await title_el.inner_text() if title_el else "?"
+                        href = await title_el.get_attribute("href") if title_el else ""
+                        # Rating is in 4th <p> (评分：豆瓣 X.X ...)
+                        rating_ps = await item.query_selector_all(SEL["result_rating_text"])
+                        rating = ""
+                        for rp in rating_ps:
+                            text = await rp.inner_text()
+                            if text.startswith("评分："):
+                                rating = text
+                                break
+                        search_results.append({
+                            "title": title.strip(),
+                            "url": href,
+                            "rating": rating[:50],
+                        })
+                    if not first_result_url and search_results:
+                        first_result_url = search_results[0]["url"]
 
+                    print(f"[PASS] Found {len(items)} results for '{search_query}'")
+                    for sr in search_results:
+                        print(f"  - {sr['title']}: {sr['url']}  {sr['rating']}")
+                    results["search"] = f"PASS ({len(items)} results)"
         except Exception as e:
             results["search"] = f"FAIL ({type(e).__name__}: {e})"
             print(f"[FAIL] Search: {e}")
 
-        # Step 5: Detail page extraction
-        print("\n--- Step 5: Detail Page Extraction ---")
+        # --- Step 5: Detail page ---
+        print("\n--- Step 5: Detail Page ---")
         try:
-            # Click first search result
-            if SELECTORS.get("result_items"):
-                first_result_link = await page.query_selector(
-                    f'{SELECTORS["result_items"]} a[href]'
-                )
-                if first_result_link:
-                    await first_result_link.click()
-                    await page.wait_for_load_state("networkidle", timeout=15000)
-                    await page.screenshot(path=str(SCREENSHOTS_DIR / "04_detail_page.png"))
-
-                    # Extract detail info
-                    detail_selectors = {
-                        "detail_title": ["h1", ".title", ".movie-title", "[class*='title']"],
-                        "detail_rating": [
-                            ".rating",
-                            ".score",
-                            "[class*='rating']",
-                            "[class*='score']",
-                        ],
-                        "detail_genres": [
-                            ".genres",
-                            ".genre",
-                            "[class*='genre']",
-                            "[class*='tag']",
-                        ],
-                        "detail_synopsis": [
-                            ".synopsis",
-                            ".description",
-                            ".summary",
-                            "[class*='desc']",
-                            "[class*='synopsis']",
-                        ],
-                    }
-
-                    detail_data = {}
-                    for field, sels in detail_selectors.items():
-                        for sel in sels:
-                            el = await page.query_selector(sel)
-                            if el:
-                                text = await el.inner_text()
-                                if text.strip():
-                                    detail_data[field] = text.strip()[:100]
-                                    SELECTORS[field] = sel
-                                    break
-
-                    if detail_data:
-                        print(f"[PASS] Detail extracted: {json.dumps(detail_data, ensure_ascii=False)}")
-                        results["detail"] = f"PASS ({', '.join(detail_data.keys())})"
-                    else:
-                        results["detail"] = "FAIL (no detail fields extracted)"
-                        print("[FAIL] Could not extract detail fields")
-                else:
-                    results["detail"] = "FAIL (no result link to click)"
+            if not first_result_url:
+                results["detail"] = "SKIP (no search result URL)"
+                print("[SKIP] No URL to navigate to")
             else:
-                results["detail"] = "SKIP (no search results)"
+                # Navigate to detail page via URL (more reliable than clicking)
+                detail_url = first_result_url
+                if not detail_url.startswith("http"):
+                    detail_url = "https://www.gying.org" + detail_url
+                await page.goto(detail_url, wait_until="networkidle", timeout=30000)
+                await page.screenshot(path=str(SCREENSHOTS_DIR / "04_detail_page.png"))
 
+                detail = {}
+                # Title
+                el = await page.query_selector(SEL["detail_title"])
+                if el:
+                    detail["title"] = (await el.inner_text()).strip()
+                # Year
+                el = await page.query_selector(SEL["detail_year"])
+                if el:
+                    detail["year"] = (await el.inner_text()).strip()
+                # Ratings (first = douban, second = IMDb)
+                ratings = await page.query_selector_all(SEL["detail_rating"])
+                if ratings:
+                    detail["douban_rating"] = (await ratings[0].inner_text()).strip()
+                if len(ratings) > 1:
+                    detail["imdb_rating"] = (await ratings[1].inner_text()).strip()
+                # Genres
+                genres = await page.query_selector_all(SEL["detail_genres"])
+                if genres:
+                    detail["genres"] = [
+                        (await g.inner_text()).strip() for g in genres
+                    ]
+                # Synopsis
+                el = await page.query_selector(SEL["detail_synopsis"])
+                if el:
+                    detail["synopsis"] = (await el.inner_text()).strip()[:120] + "..."
+                # Poster
+                el = await page.query_selector(SEL["detail_poster"])
+                if el:
+                    detail["poster_src"] = await el.get_attribute("src") or ""
+
+                if detail:
+                    print(f"[PASS] Detail: {json.dumps(detail, ensure_ascii=False)[:300]}")
+                    results["detail"] = f"PASS ({', '.join(detail.keys())})"
+                else:
+                    results["detail"] = "FAIL (no fields extracted)"
+                    print("[FAIL] No detail fields extracted")
         except Exception as e:
             results["detail"] = f"FAIL ({type(e).__name__}: {e})"
             print(f"[FAIL] Detail: {e}")
 
-        # Step 6: Download links extraction
-        print("\n--- Step 6: Download Links Extraction ---")
+        # --- Step 6: Download links ---
+        print("\n--- Step 6: Download Links ---")
         try:
-            # Look for download section
-            download_selectors = [
-                ".download",
-                ".downloads",
-                "[class*='download']",
-                "#download",
-                "table",
-                ".magnet",
-                "[class*='magnet']",
-            ]
-            download_section = None
-            for sel in download_selectors:
-                download_section = await page.query_selector(sel)
-                if download_section:
-                    SELECTORS["download_section"] = sel
-                    print(f"[INFO] Download section found: {sel}")
-                    break
-
-            # Extract all links
-            all_links = await page.query_selector_all('a[href*="magnet:"]')
-            if not all_links:
-                # Try finding magnet links in onclick or data attributes
-                all_links = await page.query_selector_all(
-                    'a[data-clipboard-text*="magnet:"], [onclick*="magnet:"]'
-                )
-
-            if all_links:
-                link_data = []
-                for link in all_links:
-                    href = await link.get_attribute("href") or ""
-                    clipboard = await link.get_attribute("data-clipboard-text") or ""
-                    text = await link.inner_text()
-                    magnet = href if href.startswith("magnet:") else clipboard
-                    link_data.append({
-                        "label": text.strip()[:80],
-                        "magnet": magnet[:80] + "..." if len(magnet) > 80 else magnet,
-                    })
-
-                # Filter for quality
-                links_4k = [lk for lk in link_data if "4K" in lk["label"] and "中字" in lk["label"]]
-                links_1080 = [
-                    lk for lk in link_data if "1080" in lk["label"] and "中字" in lk["label"]
-                ]
-
-                print(f"[PASS] Found {len(link_data)} total links")
-                print(f"  - 4K+中字: {len(links_4k)}")
-                print(f"  - 1080P+中字: {len(links_1080)}")
-                for lk in link_data[:5]:
-                    print(f"  - {lk['label']}: {lk['magnet']}")
-                results["links"] = (
-                    f"PASS ({len(link_data)} total, {len(links_4k)}×4K中字, "
-                    f"{len(links_1080)}×1080P中字)"
-                )
+            download_section = await page.query_selector(SEL["download_section"])
+            if not download_section:
+                results["links"] = "FAIL (div#down not found)"
+                print("[FAIL] Download section not found")
             else:
-                print("[FAIL] No magnet links found")
-                # Dump page for debugging
-                page_text = await page.inner_text("body")
-                print(f"[INFO] Page text preview: {page_text[:500]}")
-                results["links"] = "FAIL (no magnet links)"
+                print("[INFO] Download section found: div#down")
 
+                # Check quality tabs
+                tabs = await page.query_selector_all(SEL["download_quality_tabs"])
+                tab_labels = []
+                for tab in tabs:
+                    text = (await tab.inner_text()).strip()
+                    tab_labels.append(text)
+                print(f"[INFO] Quality tabs: {tab_labels}")
+
+                # Extract magnet links from table rows
+                rows = await page.query_selector_all(SEL["download_rows"])
+                link_data = []
+                for row in rows:
+                    magnet_el = await row.query_selector(SEL["magnet_link"])
+                    if magnet_el:
+                        name = (await magnet_el.inner_text()).strip()
+                        magnet = await magnet_el.get_attribute("href") or ""
+                        # Get size from 3rd <td>
+                        tds = await row.query_selector_all("td")
+                        size = ""
+                        if len(tds) >= 3:
+                            size = (await tds[2].inner_text()).strip()
+                        link_data.append({
+                            "name": name[:80],
+                            "magnet": magnet[:80] + "..." if len(magnet) > 80 else magnet,
+                            "size": size,
+                        })
+
+                if link_data:
+                    # Classify by quality (check filename for 4K/2160p/1080p and 中字/中文)
+                    links_4k_cn = [
+                        lk for lk in link_data
+                        if ("4K" in lk["name"] or "2160p" in lk["name"])
+                        and ("中字" in lk["name"] or "中文" in lk["name"])
+                    ]
+                    links_1080_cn = [
+                        lk for lk in link_data
+                        if "1080p" in lk["name"].lower()
+                        and ("中字" in lk["name"] or "中文" in lk["name"])
+                    ]
+                    print(f"[PASS] Found {len(link_data)} magnet links")
+                    print(f"  - 中字4K: {len(links_4k_cn)}")
+                    print(f"  - 中字1080P: {len(links_1080_cn)}")
+                    for lk in link_data[:5]:
+                        print(f"  - [{lk['size']}] {lk['name']}")
+                    results["links"] = (
+                        f"PASS ({len(link_data)} total, "
+                        f"{len(links_4k_cn)}×中字4K, {len(links_1080_cn)}×中字1080P)"
+                    )
+                else:
+                    results["links"] = "FAIL (no magnet links in table)"
+                    print("[FAIL] No magnet links found in table rows")
         except Exception as e:
             results["links"] = f"FAIL ({type(e).__name__}: {e})"
             print(f"[FAIL] Links: {e}")
 
-        # Step 7: Latest/trending listing page
-        print("\n--- Step 7: Latest Listing Page ---")
+        # --- Step 7: Homepage listing ---
+        print("\n--- Step 7: Homepage Listing ---")
         try:
-            # Navigate to homepage or latest page
             await page.goto("https://www.gying.org/", wait_until="networkidle", timeout=30000)
             await page.screenshot(path=str(SCREENSHOTS_DIR / "05_listing_page.png"))
 
-            # Look for movie listing items
-            listing_selectors = [
-                ".movie-item",
-                ".card",
-                ".item",
-                ".list-item",
-                'a[href*="movie"]',
-                'a[href*="detail"]',
-                ".post",
-                "article",
-            ]
-            listing_items = []
-            for sel in listing_selectors:
-                items = await page.query_selector_all(sel)
-                if len(items) >= 3:
-                    SELECTORS["listing_items"] = sel
-                    listing_items = items
-                    print(f"[INFO] Listing items found: {sel} ({len(items)} items)")
-                    break
-
-            if listing_items:
-                listing_data = []
-                for item in listing_items[:10]:
-                    title_el = await item.query_selector(
-                        "h2, h3, h4, .title, [class*='title'], a"
-                    )
-                    title = await title_el.inner_text() if title_el else "unknown"
-                    href_el = await item.query_selector("a[href]")
-                    href = await href_el.get_attribute("href") if href_el else ""
-                    listing_data.append({"title": title.strip()[:60], "url": href})
-
-                print(f"[PASS] Latest listing: {len(listing_data)} movies")
-                for m in listing_data[:5]:
-                    print(f"  - {m['title']}: {m['url']}")
-                results["listing"] = f"PASS ({len(listing_data)} movies)"
-            else:
-                results["listing"] = "FAIL (no listing items)"
+            items = await page.query_selector_all(SEL["listing_items"])
+            if not items:
+                results["listing"] = "FAIL (no ul.content-list li)"
                 print("[FAIL] No listing items found")
+            else:
+                listing_data = []
+                movie_count = 0
+                tv_count = 0
+                for item in items[:24]:  # Limit to avoid too many
+                    title_el = await item.query_selector(SEL["listing_title"])
+                    title = (await title_el.inner_text()).strip() if title_el else "?"
+                    href = (await title_el.get_attribute("href") or "") if title_el else ""
+                    rating_el = await item.query_selector(SEL["listing_rating"])
+                    rating = (await rating_el.inner_text()).strip() if rating_el else ""
+                    tag_el = await item.query_selector(SEL["listing_tag"])
+                    tag = (await tag_el.inner_text()).strip() if tag_el else ""
+                    is_movie = href.startswith("/mv/")
+                    if is_movie:
+                        movie_count += 1
+                    else:
+                        tv_count += 1
+                    listing_data.append({
+                        "title": title,
+                        "url": href,
+                        "rating": rating,
+                        "tag": tag[:40],
+                        "type": "movie" if is_movie else "tv",
+                    })
 
+                print(f"[PASS] Listing: {len(listing_data)} items ({movie_count} movies, {tv_count} TV)")
+                for item_data in listing_data[:6]:
+                    marker = "M" if item_data["type"] == "movie" else "T"
+                    print(
+                        f"  [{marker}] {item_data['title']} ({item_data['rating']}) "
+                        f"- {item_data['tag']}"
+                    )
+                results["listing"] = (
+                    f"PASS ({len(listing_data)} items: {movie_count} movies, {tv_count} TV)"
+                )
         except Exception as e:
             results["listing"] = f"FAIL ({type(e).__name__}: {e})"
             print(f"[FAIL] Listing: {e}")
 
-        # Step 8: Save selectors
-        print("\n--- Step 8: Save Selectors ---")
-        SELECTORS_FILE.write_text(json.dumps(SELECTORS, ensure_ascii=False, indent=2))
+        # --- Step 8: Save selectors & browser state ---
+        print("\n--- Step 8: Save ---")
+        SELECTORS_FILE.write_text(json.dumps(SEL, ensure_ascii=False, indent=2))
         print(f"[INFO] Selectors saved to {SELECTORS_FILE}")
 
-        # Save browser state (cookies)
         storage = await browser.storage_state()
         storage_file = OUTPUT_DIR / "gying_storage_state.json"
         storage_file.write_text(json.dumps(storage, ensure_ascii=False, indent=2))
@@ -441,7 +358,7 @@ async def main():
 
         await browser.close()
 
-    # Print summary
+    # --- Summary ---
     print("\n" + "=" * 60)
     print("SPIKE U2 RESULTS SUMMARY")
     print("=" * 60)
@@ -450,7 +367,6 @@ async def main():
         print(f"[{status}] {key}: {val}")
     print("=" * 60)
 
-    # Save results
     results_file = OUTPUT_DIR / "spike_u2_results.json"
     results_file.write_text(json.dumps(results, ensure_ascii=False, indent=2))
     print(f"\nResults saved to {results_file}")
