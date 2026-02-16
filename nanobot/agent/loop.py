@@ -46,6 +46,7 @@ class AgentLoop:
         cron_service: "CronService | None" = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
+        config: "Config | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -58,6 +59,7 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+        self.config = config
         
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -106,6 +108,32 @@ class AgentLoop:
         # Cron tool (for scheduling)
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+
+        # Integration tools (conditional on config)
+        if self.config and self.config.integrations.gying.enabled:
+            from nanobot.agent.tools.gying import GyingScraperTool, GyingUpdatesTool
+
+            gying_cfg = self.config.integrations.gying
+            self.tools.register(GyingScraperTool(
+                browser_data_dir=gying_cfg.browser_data_dir,
+                headless=gying_cfg.headless,
+            ))
+
+            seen_file = str(self.workspace / "film_download" / "seen_movies.json")
+            self.tools.register(GyingUpdatesTool(
+                seen_file=seen_file,
+                browser_data_dir=gying_cfg.browser_data_dir,
+                headless=gying_cfg.headless,
+            ))
+
+        if self.config and self.config.integrations.cloud115.enabled:
+            from nanobot.agent.tools.cloud115 import Cloud115Tool
+
+            cloud115_cfg = self.config.integrations.cloud115
+            self.tools.register(Cloud115Tool(
+                session_path=cloud115_cfg.session_path,
+                default_save_path=cloud115_cfg.default_save_path,
+            ))
     
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""

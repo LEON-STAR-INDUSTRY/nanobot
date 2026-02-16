@@ -112,6 +112,29 @@ class ToolsConfig(BaseModel):
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
 
 
+class Cloud115Config(BaseModel):
+    """115.com cloud storage configuration."""
+    enabled: bool = False
+    session_path: str = ""  # Default: ~/.nanobot/cloud115_session.json
+    default_save_path: str = "/"  # Default 115 folder for downloads
+
+
+class GyingConfig(BaseModel):
+    """gying.org scraper configuration."""
+    enabled: bool = False
+    browser_data_dir: str = ""  # Default: ~/.nanobot/browser_data/gying/
+    headless: bool = True
+    check_schedule: str = "0 9 * * *"
+    notify_channel: str = "feishu"
+    notify_to: str = ""
+
+
+class IntegrationsConfig(BaseModel):
+    """Third-party integrations configuration."""
+    cloud115: Cloud115Config = Field(default_factory=Cloud115Config)
+    gying: GyingConfig = Field(default_factory=GyingConfig)
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
@@ -119,6 +142,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    integrations: IntegrationsConfig = Field(default_factory=IntegrationsConfig)
     
     @property
     def workspace_path(self) -> Path:

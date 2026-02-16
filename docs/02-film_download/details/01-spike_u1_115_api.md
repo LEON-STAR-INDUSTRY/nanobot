@@ -1,16 +1,17 @@
 # DOCUMENT METADATA
 title: Spike U1 — 115 API Library Validation Results
 filename: 01-spike_u1_115_api.md
-status: Draft
-version: 1.0.0
+status: Approved
+version: 1.1.0
 owner: AI Assistant
-last_updated: 2026-02-11
+last_updated: 2026-02-15
 ---
 
 ## Document History
 | Version | Date       | Author | Description of Changes |
 |---------|------------|--------|------------------------|
 | 1.0.0   | 2026-02-11 | Claude | Initial creation       |
+| 1.1.0   | 2026-02-15 | Claude | Updated with actual test results, corrected API usage patterns |
 
 ## Purpose & Scope
 > Summary of Spike U1: Validate that p115client can complete the full 115.com QR login → session save → magnet add cycle via HTTP API.
@@ -19,48 +20,47 @@ last_updated: 2026-02-11
 
 ## Implementation Summary
 
-### Library Used
-- **p115client** (primary) — async-capable 115.com client via `async_=True` parameter
-- py115 available as fallback but not tested
+### Library
+- **p115client** — async 115.com client
+- 安装方式: `pip install -U git+https://github.com/ChenyangGao/p115client@main`
+- py115 作为备选但未测试
 
 ### Spike Script
 - `tests/spike/spike_115_api.py`
 
-### Key API Methods Discovered
+### Key API Patterns（已验证）
 
-| Method | Purpose | Notes |
-|--------|---------|-------|
-| `P115Client.login_qrcode_token(async_=True)` | Get QR code UID | Returns `{"data": {"uid": "..."}}` |
-| `P115Client.login_qrcode_scan_status({"uid": uid}, async_=True)` | Poll scan status | 0=waiting, 1=scanned, 2=confirmed, -1=expired |
-| `P115Client.login_qrcode_scan_result({"uid": uid, "app": "web"}, async_=True)` | Get login cookies | Call after status=2 |
-| `P115Client(cookies_path, check_for_relogin=True)` | Reload session | Auto re-auth on 405 |
-| `P115Client.offline_add_urls(payload, async_=True)` | Add magnet link | `payload={"urls": magnet, "wp_path_id": folder_id}` |
-| `P115Client.offline_list(async_=True)` | List download tasks | Returns task array |
-| `P115Client.user_info(async_=True)` | Validate session | Check `state` field |
+| 操作 | 代码 | 说明 |
+|------|------|------|
+| QR 登录 | `await P115Client.login_with_qrcode(app="web", console_qrcode=True, async_=True)` | 类方法，自动处理 QR 生成、展示、轮询；返回 login_result dict |
+| 从登录结果创建客户端 | `P115Client(login_result)` | 传入 login_with_qrcode 的返回值 |
+| 从已保存 cookie 创建客户端 | `P115Client(cookies_dict, check_for_relogin=True)` | cookies_dict 是 `{"UID": "xxx", "CID": "yyy", ...}` 形式的 dict |
+| 验证 session | `await client.user_info(async_=True)` | 检查返回值 `state` 字段 |
+| 添加磁力下载 | `await client.offline_add_urls(magnet_str, async_=True)` | 第一个参数直接传 magnet 字符串 |
+| 查询下载列表 | `await client.offline_list(async_=True)` | 返回 `{"tasks": [...]}` |
 
-### QR Code Lifecycle
-- QR image URL format: `https://qrcodeapi.115.com/api/1.0/mac/1.0/qrcode?uid={uid}`
-- Poll interval: 2 seconds
-- Expiry time: ~120 seconds (configurable)
-- Image format: PNG
+### Credential Serialization（已验证）
+- Session 文件格式: JSON
+- 存储内容: `{"cookies": {"UID": "...", "CID": "...", ...}, "login_result": {...}}`
+- Cookie 来源: `login_result["data"]["cookie"]`
+- 重要: 传给 `P115Client()` 的是 cookies dict，**不是**文件路径
+- `check_for_relogin=True` 在 session 过期时自动触发重新登录
 
-### Credential Serialization
-- Cookies stored as JSON at `~/.nanobot/cloud115_session.json`
-- Key cookies: CID, SEID, UID
-- `check_for_relogin=True` enables auto-recovery on 405
-
-### Error Codes
-| Code | Meaning |
-|------|---------|
-| 405  | Session expired (triggers re-login if `check_for_relogin=True`) |
-| `state=false` | API call failed, check `errno` and `error` fields |
+### 注意事项
+- `login_with_qrcode` 是**类方法**，不是实例方法
+- `offline_add_urls` 第一个参数直接传 magnet 字符串，不需要包装成 `{"urls": ..., "wp_path_id": ...}` 的 dict
+- 所有异步方法通过 `async_=True` 参数启用
 
 ## Test Results
 
-> **Status: PENDING** — Run `python tests/spike/spike_115_api.py` manually to validate.
+| 测试项 | 结果 | 备注 |
+|--------|------|------|
+| QR 登录 | ✅ PASS | 首次运行通过 QR 扫码登录成功，后续运行使用 saved session |
+| Session 保存/重载 | ✅ PASS | 从 JSON 文件重载 cookies，用户信息验证成功 |
+| 添加磁力任务 | ✅ PASS | `offline_add_urls` 成功，`state=true` |
+| 任务列表查询 | ✅ PASS | `offline_list` 正常返回任务列表 |
 
-## Issues & Notes
-- QR login requires manual phone scanning — cannot be automated
-- `check_for_relogin=True` is critical for production use (auto re-auth)
-- All API methods support async via `async_=True` parameter
-- Session file path is configurable via Cloud115Config
+## Files
+- Script: `tests/spike/spike_115_api.py`
+- Results: `tests/spike/output/spike_u1_results.json`
+- Session: `tests/spike/output/115_session.json` (gitignored)

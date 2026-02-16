@@ -28,7 +28,8 @@
       "WebFetch(domain:github.com)",
       "WebFetch(domain:www.semrush.com)",
       "WebFetch(domain:www.wappalyzer.com)",
-      "WebFetch(domain:builtwith.com)"
+      "WebFetch(domain:builtwith.com)",
+      "Bash(ruff check:*)"
     ]
   }
 }

@@ -1,0 +1,44 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.nanobot/workspace",
+      "model": "anthropic/claude-opus-4-5",
+      "maxTokens": 8192,
+      "temperature": 0.7,
+      "maxToolIterations": 20
+    }
+  },
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "appId": "<YOUR_FEISHU_APP_ID>",
+      "appSecret": "<YOUR_FEISHU_APP_SECRET>",
+      "encryptKey": "",
+      "verificationToken": "",
+      "allowFrom": []
+    }
+  },
+  "providers": {
+    "anthropic": {
+      "apiKey": "<YOUR_ANTHROPIC_API_KEY>"
+    }
+  },
+  "integrations": {
+    "cloud115": {
+      "enabled": true,
+      "sessionPath": "~/.nanobot/cloud115_session.json",
+      "defaultSavePath": "/"
+    },
+    "gying": {
+      "enabled": true,
+      "browserDataDir": "~/.nanobot/browser_data/gying",
+      "headless": true,
+      "checkSchedule": "0 9 * * *",
+      "notifyChannel": "feishu",
+      "notifyTo": "<YOUR_FEISHU_OPEN_ID>"
+    }
+  },
+  "tools": {
+    "restrictToWorkspace": false
+  }
+}
