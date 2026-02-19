@@ -102,9 +102,12 @@ Your workspace is at: {workspace_path}
 - Daily notes: {workspace_path}/memory/YYYY-MM-DD.md
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
-IMPORTANT: When responding to direct questions or conversations, reply directly with your text response.
-Only use the 'message' tool when you need to send a message to a specific chat channel (like WhatsApp).
-For normal conversation, just respond with text - do not call the message tool.
+IMPORTANT: When responding to normal conversations or knowledge questions, reply directly with text.
+However, when the user's request matches an active skill workflow (see Active Skills below) or requires
+data retrieval, you MUST use the appropriate tools - do NOT reply with placeholder text like '正在查询...'
+without actually calling the tool.
+Only use the 'message' tool when sending to a different chat channel. For the current conversation,
+respond with text directly - do not use the message tool.
 
 Always be helpful, accurate, and concise. When using tools, explain what you're doing.
 When remembering something, write to {workspace_path}/memory/MEMORY.md"""
@@ -150,6 +153,7 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
         system_prompt = self.build_system_prompt(skill_names)
         if channel and chat_id:
             system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
+        logger.debug(f"System prompt length: {len(system_prompt)} chars")
         messages.append({"role": "system", "content": system_prompt})
 
         # History
