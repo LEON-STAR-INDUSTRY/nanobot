@@ -45,8 +45,10 @@ class GyingScraperTool(Tool):
     ):
         self._browser_data_dir = browser_data_dir
         self._headless = headless
+        self._pw = None
         self._browser = None
         self._page = None
+        self._logged_in = False
 
     @property
     def name(self) -> str:
@@ -81,7 +83,7 @@ class GyingScraperTool(Tool):
                 },
                 "quality": {
                     "type": "string",
-                    "description": "Quality filter: '4K', '1080P', or empty for all.",
+                    "description": "Quality tab filter: '4K' (中字4K tab), '1080P' (中字1080P tab), or empty for both.",
                 },
             },
             "required": ["action"],
@@ -113,16 +115,15 @@ class GyingScraperTool(Tool):
                         {"error": "缺少url参数，请提供影片详情页URL"}, ensure_ascii=False
                     )
                 quality = kwargs.get("quality", "")
-                all_links = await self._links(url)
-                result = {"links": all_links}
-                if quality:
-                    filtered = [
-                        lk for lk in all_links
-                        if quality.upper() in lk.get("name", "").upper()
-                    ]
-                    result["filtered"] = filtered
-                    result["filter"] = quality
-                return json.dumps(result, ensure_ascii=False)
+                # Map quality param to target tabs
+                if quality.upper() == "4K":
+                    quality_tabs = ["中字4K"]
+                elif quality.upper() == "1080P":
+                    quality_tabs = ["中字1080P"]
+                else:
+                    quality_tabs = None  # Default: both 中字4K + 中字1080P
+                links = await self._links(url, quality_tabs=quality_tabs)
+                return json.dumps({"links": links}, ensure_ascii=False)
             else:
                 return json.dumps({"error": f"未知操作: {action}"}, ensure_ascii=False)
         except Exception as e:
@@ -142,18 +143,31 @@ class GyingScraperTool(Tool):
 
         from playwright.async_api import async_playwright
 
-        pw = await async_playwright().start()
-        launch_args = {
-            "headless": self._headless,
-            "args": ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+        self._pw = await async_playwright().start()
+        context_args = {
             "locale": "zh-CN",
             "viewport": {"width": 1280, "height": 800},
         }
-        if self._browser_data_dir:
-            launch_args["user_data_dir"] = self._browser_data_dir
+        launch_args = {
+            "headless": self._headless,
+            "args": ["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+        }
 
-        self._browser = await pw.chromium.launch_persistent_context(**launch_args)
-        self._page = self._browser.pages[0] if self._browser.pages else await self._browser.new_page()
+        if self._browser_data_dir:
+            # Persistent context: retains cookies/session across runs
+            self._browser = await self._pw.chromium.launch_persistent_context(
+                self._browser_data_dir, **launch_args, **context_args
+            )
+            self._page = (
+                self._browser.pages[0]
+                if self._browser.pages
+                else await self._browser.new_page()
+            )
+        else:
+            # Non-persistent: ephemeral session
+            browser = await self._pw.chromium.launch(**launch_args)
+            self._browser = await browser.new_context(**context_args)
+            self._page = await self._browser.new_page()
 
         # Apply stealth
         try:
@@ -168,12 +182,34 @@ class GyingScraperTool(Tool):
 
         logger.info("Playwright browser launched for gying.org")
 
+    async def _ensure_logged_in(self):
+        """Navigate to gying.org and verify login. Raises if not authenticated."""
+        if self._logged_in:
+            return
+        page = self._page
+        await page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
+
+        # Check for search input as login indicator
+        search_input = await page.query_selector(SELECTORS["search_input"])
+        if search_input:
+            self._logged_in = True
+            return
+
+        # Not logged in — provide actionable error
+        raise RuntimeError(
+            "gying.org 未登录。请先配置 browserDataDir 并在浏览器中手动登录一次，"
+            "使 cookies 持久化后再使用此工具。"
+        )
+
     async def close(self):
-        """Close browser."""
+        """Close browser and playwright process."""
         if self._browser:
             await self._browser.close()
             self._browser = None
             self._page = None
+        if self._pw:
+            await self._pw.stop()
+            self._pw = None
 
     # ------------------------------------------------------------------
     # Scraping methods
@@ -182,17 +218,14 @@ class GyingScraperTool(Tool):
     async def _search(self, query: str) -> list[dict]:
         """Search gying.org for movies."""
         await self._ensure_browser()
+        await self._ensure_logged_in()
         page = self._page
 
-        await page.goto(BASE_URL, wait_until="networkidle", timeout=30000)
         search_input = await page.query_selector(SELECTORS["search_input"])
-        if not search_input:
-            raise RuntimeError("搜索框未找到")
-
         await search_input.click()
         await search_input.fill(query)
-        await page.keyboard.press("Enter")
-        await page.wait_for_load_state("networkidle", timeout=15000)
+        async with page.expect_navigation(wait_until="networkidle", timeout=15000):
+            await page.keyboard.press("Enter")
 
         items = await page.query_selector_all(SELECTORS["result_items"])
         results = []
@@ -216,6 +249,7 @@ class GyingScraperTool(Tool):
     async def _detail(self, url: str) -> dict:
         """Get movie detail from gying.org."""
         await self._ensure_browser()
+        await self._ensure_logged_in()
         page = self._page
 
         full_url = url if url.startswith("http") else BASE_URL + url
@@ -252,9 +286,23 @@ class GyingScraperTool(Tool):
         detail["url"] = url
         return detail
 
-    async def _links(self, url: str) -> list[dict]:
-        """Get magnet download links from a movie detail page."""
+    # Target tab labels — only these tabs are relevant
+    QUALITY_TABS = ["中字4K", "中字1080P"]
+
+    async def _links(self, url: str, quality_tabs: list[str] | None = None) -> list[dict]:
+        """Get magnet download links filtered by quality tab panels.
+
+        Args:
+            url: Movie detail page URL.
+            quality_tabs: Tab labels to extract from (e.g. ["中字4K"]).
+                          Defaults to QUALITY_TABS.
+
+        Returns:
+            List of link dicts, each with quality_tab field indicating source tab.
+            Empty list if no matching tabs found on the page.
+        """
         await self._ensure_browser()
+        await self._ensure_logged_in()
         page = self._page
 
         # Navigate if not already on the right page
@@ -263,23 +311,55 @@ class GyingScraperTool(Tool):
         if full_url not in current:
             await page.goto(full_url, wait_until="networkidle", timeout=30000)
 
-        rows = await page.query_selector_all(SELECTORS["download_rows"])
+        target_tabs = quality_tabs or self.QUALITY_TABS
+
+        # Step 1: Find all tab elements and match target labels
+        tab_els = await page.query_selector_all(SELECTORS["download_quality_tabs"])
+        matched_panels = []  # [(panel_selector, tab_label)]
+        for tab_el in tab_els:
+            tab_text = (await tab_el.inner_text()).strip()
+            for target in target_tabs:
+                if target in tab_text:
+                    # Find the <a> inside the tab <li> to get panel reference
+                    a_el = await tab_el.query_selector("a")
+                    if not a_el:
+                        continue
+                    panel_id = (
+                        await a_el.get_attribute("href")
+                        or await a_el.get_attribute("data-bs-target")
+                        or await a_el.get_attribute("data-target")
+                        or ""
+                    )
+                    if panel_id.startswith("#"):
+                        matched_panels.append((panel_id, target))
+                    break
+
+        if not matched_panels:
+            logger.info(f"No matching quality tabs found on {url} (wanted: {target_tabs})")
+            return []
+
+        # Step 2: Extract links from each matched panel
         links = []
-        for row in rows:
-            magnet_el = await row.query_selector(SELECTORS["magnet_link"])
-            if not magnet_el:
-                continue
-            name = (await magnet_el.inner_text()).strip()
-            magnet = await magnet_el.get_attribute("href") or ""
-            tds = await row.query_selector_all("td")
-            size = (await tds[2].inner_text()).strip() if len(tds) >= 3 else ""
-            seeds = (await tds[3].inner_text()).strip() if len(tds) >= 4 else ""
-            links.append({
-                "name": name,
-                "magnet": magnet,
-                "size": size,
-                "seeds": seeds,
-            })
+        for panel_selector, tab_label in matched_panels:
+            rows = await page.query_selector_all(
+                f"{panel_selector} {SELECTORS['download_rows']}"
+            )
+            for row in rows:
+                magnet_el = await row.query_selector(SELECTORS["magnet_link"])
+                if not magnet_el:
+                    continue
+                name = (await magnet_el.inner_text()).strip()
+                magnet = await magnet_el.get_attribute("href") or ""
+                tds = await row.query_selector_all("td")
+                size = (await tds[2].inner_text()).strip() if len(tds) >= 3 else ""
+                seeds = (await tds[3].inner_text()).strip() if len(tds) >= 4 else ""
+                links.append({
+                    "name": name,
+                    "magnet": magnet,
+                    "size": size,
+                    "seeds": seeds,
+                    "quality_tab": tab_label,
+                })
 
         return links
 
