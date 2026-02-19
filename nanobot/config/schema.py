@@ -1,8 +1,12 @@
 """Configuration schema using Pydantic."""
 
 from pathlib import Path
+
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
+
+from nanobot.agent.tools.integrations.cloud115.config import Cloud115Config  # noqa: F401
+from nanobot.agent.tools.integrations.gying.config import GyingConfig  # noqa: F401
 
 
 class WhatsAppConfig(BaseModel):
@@ -112,22 +116,6 @@ class ToolsConfig(BaseModel):
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
 
 
-class Cloud115Config(BaseModel):
-    """115.com cloud storage configuration."""
-    enabled: bool = False
-    session_path: str = ""  # Default: ~/.nanobot/cloud115_session.json
-    default_save_path: str = "/"  # Default 115 folder for downloads
-
-
-class GyingConfig(BaseModel):
-    """gying.org scraper configuration."""
-    enabled: bool = False
-    browser_data_dir: str = ""  # Default: ~/.nanobot/browser_data/gying/
-    headless: bool = True
-    check_schedule: str = "0 9 * * *"
-    notify_channel: str = "feishu"
-    notify_to: str = ""
-
 
 class IntegrationsConfig(BaseModel):
     """Third-party integrations configuration."""
@@ -143,12 +131,12 @@ class Config(BaseSettings):
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     integrations: IntegrationsConfig = Field(default_factory=IntegrationsConfig)
-    
+
     @property
     def workspace_path(self) -> Path:
         """Get expanded workspace path."""
         return Path(self.agents.defaults.workspace).expanduser()
-    
+
     # Default base URLs for API gateways
     _GATEWAY_DEFAULTS = {"openrouter": "https://openrouter.ai/api/v1", "aihubmix": "https://aihubmix.com/v1"}
 
@@ -177,7 +165,7 @@ class Config(BaseSettings):
         """Get API key for the given model. Falls back to first available key."""
         p = self.get_provider(model)
         return p.api_key if p else None
-    
+
     def get_api_base(self, model: str | None = None) -> str | None:
         """Get API base URL for the given model. Applies default URLs for known gateways."""
         p = self.get_provider(model)
@@ -188,7 +176,7 @@ class Config(BaseSettings):
             if p == getattr(self.providers, name):
                 return url
         return None
-    
+
     class Config:
         env_prefix = "NANOBOT_"
         env_nested_delimiter = "__"

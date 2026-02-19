@@ -267,3 +267,17 @@ class Cloud115Tool(Tool):
         session_data = {"cookies": cookies}
         self._session_path.write_text(json.dumps(session_data, ensure_ascii=False, indent=2))
         logger.info(f"115 session saved to {self._session_path}")
+
+
+# ---------------------------------------------------------------------------
+# TOOLS descriptor -- used by IntegrationLoader to auto-register tools
+# ---------------------------------------------------------------------------
+TOOLS = [
+    {
+        "class": Cloud115Tool,
+        "config_map": {
+            "session_path": "session_path",
+            "default_save_path": "default_save_path",
+        },
+    },
+]

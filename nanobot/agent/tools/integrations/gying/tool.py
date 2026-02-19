@@ -1,4 +1,4 @@
-"""GyingScraperTool: Playwright-based gying.org scraper."""
+"""GyingScraperTool + GyingUpdatesTool: Playwright-based gying.org scraper."""
 
 import json
 from datetime import datetime, timezone
@@ -448,3 +448,27 @@ class GyingUpdatesTool(Tool):
         self._seen_file.write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+
+# ---------------------------------------------------------------------------
+# TOOLS descriptor -- used by IntegrationLoader to auto-register tools
+# ---------------------------------------------------------------------------
+TOOLS = [
+    {
+        "class": GyingScraperTool,
+        "config_map": {
+            "browser_data_dir": "browser_data_dir",
+            "headless": "headless",
+        },
+    },
+    {
+        "class": GyingUpdatesTool,
+        "config_map": {
+            "browser_data_dir": "browser_data_dir",
+            "headless": "headless",
+        },
+        "workspace_fields": {
+            "seen_file": "film_download/seen_movies.json",
+        },
+    },
+]

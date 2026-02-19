@@ -2,7 +2,7 @@
 title: Film Download - Quick Start Guide
 filename: QUICK_START.md
 status: Approved
-version: 1.0.0
+version: 1.1.0
 owner: AI Assistant
 last_updated: 2026-02-16
 ---
@@ -11,6 +11,7 @@ last_updated: 2026-02-16
 | Version | Date       | Author | Description of Changes |
 |---------|------------|--------|------------------------|
 | 1.0.0   | 2026-02-16 | Claude | Initial creation       |
+| 1.1.0   | 2026-02-16 | Claude | Update import paths after integration refactoring |
 
 ## Purpose & Scope
 > 快速验证影片搜索下载功能模块的端到端指南。
@@ -71,7 +72,7 @@ print(f'feishu enabled: {c.channels.feishu.enabled}')
 ```bash
 python -c "
 import asyncio
-from nanobot.agent.tools.gying import GyingScraperTool
+from nanobot.agent.tools.integrations.gying.tool import GyingScraperTool
 
 async def test():
     tool = GyingScraperTool(headless=False)
@@ -99,7 +100,7 @@ asyncio.run(test())
 ```bash
 python -c "
 import asyncio
-from nanobot.agent.tools.cloud115 import Cloud115Tool
+from nanobot.agent.tools.integrations.cloud115.tool import Cloud115Tool
 
 async def test():
     tool = Cloud115Tool(session_path='$HOME/.nanobot/cloud115_session.json')
@@ -210,5 +211,5 @@ cat ~/.nanobot/workspace/film_download/seen_movies.json
 # 运行完整测试套件确认无回归
 pytest -v
 
-# 当前应有 63 tests, all passing
+# 当前应有 75 tests, all passing
 ```

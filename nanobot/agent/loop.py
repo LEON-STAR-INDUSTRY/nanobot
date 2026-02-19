@@ -109,31 +109,12 @@ class AgentLoop:
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
 
-        # Integration tools (conditional on config)
-        if self.config and self.config.integrations.gying.enabled:
-            from nanobot.agent.tools.gying import GyingScraperTool, GyingUpdatesTool
+        # Integration tools (dynamically loaded from integrations/ directory)
+        if self.config:
+            from nanobot.agent.tools.integrations.loader import IntegrationLoader
 
-            gying_cfg = self.config.integrations.gying
-            self.tools.register(GyingScraperTool(
-                browser_data_dir=gying_cfg.browser_data_dir,
-                headless=gying_cfg.headless,
-            ))
-
-            seen_file = str(self.workspace / "film_download" / "seen_movies.json")
-            self.tools.register(GyingUpdatesTool(
-                seen_file=seen_file,
-                browser_data_dir=gying_cfg.browser_data_dir,
-                headless=gying_cfg.headless,
-            ))
-
-        if self.config and self.config.integrations.cloud115.enabled:
-            from nanobot.agent.tools.cloud115 import Cloud115Tool
-
-            cloud115_cfg = self.config.integrations.cloud115
-            self.tools.register(Cloud115Tool(
-                session_path=cloud115_cfg.session_path,
-                default_save_path=cloud115_cfg.default_save_path,
-            ))
+            loader = IntegrationLoader(workspace=self.workspace)
+            loader.load_all(self.tools, self.config.integrations)
     
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
