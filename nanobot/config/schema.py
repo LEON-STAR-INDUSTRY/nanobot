@@ -1,9 +1,12 @@
 """Configuration schema using Pydantic."""
 
 from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from pydantic.alias_generators import to_camel
+
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
+
+from nanobot.agent.tools.integrations.cloud115.config import Cloud115Config  # noqa: F401
+from nanobot.agent.tools.integrations.gying.config import GyingConfig  # noqa: F401
 
 
 class Base(BaseModel):
@@ -268,6 +271,13 @@ class ToolsConfig(Base):
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
+
+class IntegrationsConfig(BaseModel):
+    """Third-party integrations configuration."""
+    cloud115: Cloud115Config = Field(default_factory=Cloud115Config)
+    gying: GyingConfig = Field(default_factory=GyingConfig)
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
 
@@ -276,34 +286,15 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    integrations: IntegrationsConfig = Field(default_factory=IntegrationsConfig)
 
     @property
     def workspace_path(self) -> Path:
         """Get expanded workspace path."""
         return Path(self.agents.defaults.workspace).expanduser()
 
-    def _match_provider(self, model: str | None = None) -> tuple["ProviderConfig | None", str | None]:
-        """Match provider config and its registry name. Returns (config, spec_name)."""
-        from nanobot.providers.registry import PROVIDERS
-
-        model_lower = (model or self.agents.defaults.model).lower()
-
-        # Match by keyword (order follows PROVIDERS registry)
-        for spec in PROVIDERS:
-            p = getattr(self.providers, spec.name, None)
-            if p and any(kw in model_lower for kw in spec.keywords):
-                if spec.is_oauth or p.api_key:
-                    return p, spec.name
-
-        # Fallback: gateways first, then others (follows registry order)
-        # OAuth providers are NOT valid fallbacks — they require explicit model selection
-        for spec in PROVIDERS:
-            if spec.is_oauth:
-                continue
-            p = getattr(self.providers, spec.name, None)
-            if p and p.api_key:
-                return p, spec.name
-        return None, None
+    # Default base URLs for API gateways
+    _GATEWAY_DEFAULTS = {"openrouter": "https://openrouter.ai/api/v1", "aihubmix": "https://aihubmix.com/v1"}
 
     def get_provider(self, model: str | None = None) -> ProviderConfig | None:
         """Get matched provider config (api_key, api_base, extra_headers). Falls back to first available."""
@@ -336,4 +327,6 @@ class Config(BaseSettings):
                 return spec.default_api_base
         return None
 
-    model_config = ConfigDict(env_prefix="NANOBOT_", env_nested_delimiter="__")
+    class Config:
+        env_prefix = "NANOBOT_"
+        env_nested_delimiter = "__"

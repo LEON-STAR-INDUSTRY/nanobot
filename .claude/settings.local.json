@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(superpowers:brainstorming)",
+      "Bash(taskkill:*)",
+      "Bash(python:*)",
+      "Bash(ls:*)",
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__query-docs",
+      "Bash(git add:*)",
+      "Skill(superpowers:writing-plans)",
+      "Skill(superpowers:subagent-driven-development)",
+      "Bash(tree:*)",
+      "Bash(git commit:*)",
+      "Bash(test:*)",
+      "Bash(pytest:*)",
+      "Bash(git log:*)",
+      "Bash(dir:*)",
+      "Bash(flake8:*)",
+      "Bash(if exist nul del nul)",
+      "mcp__deepwiki__ask_question",
+      "mcp__deepwiki__read_wiki_structure",
+      "Bash(pip index:*)",
+      "Bash(pip install:*)",
+      "WebSearch",
+      "WebFetch(domain:www.gying.org)",
+      "WebFetch(domain:gying.org)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.semrush.com)",
+      "WebFetch(domain:www.wappalyzer.com)",
+      "WebFetch(domain:builtwith.com)",
+      "Bash(ruff check:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(git -C \"C:/Users/cowls-praxis-0h/projects/agents-89b3e9d799\" branch --show-current)",
+      "Bash(grep:*)"
+    ]
+  }
+}

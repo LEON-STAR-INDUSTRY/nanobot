@@ -1,0 +1,25 @@
+{
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "appId": "<YOUR_FEISHU_APP_ID>",
+      "appSecret": "<YOUR_FEISHU_APP_SECRET>",
+      "encryptKey": "",
+      "verificationToken": "",
+      "allowFrom": []
+    }
+  },
+  "integrations": {
+    "cloud115": {
+      "enabled": true,
+      "sessionPath": "~/.nanobot/cloud115_session.json",
+      "defaultSavePath": "/"
+    },
+    "gying": {
+      "enabled": true,
+      "browserDataDir": "~/.nanobot/browser_data/gying",
+      "headless": true,
+      "checkSchedule": "0 9 * * *"
+    }
+  }
+}

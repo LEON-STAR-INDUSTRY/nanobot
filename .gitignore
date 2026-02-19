@@ -3,7 +3,6 @@
 *.pyc
 dist/
 build/
-docs/
 *.egg-info/
 *.egg
 *.pyc
@@ -21,5 +20,6 @@ poetry.lock
 botpy.log
 tests/
 
-
+# 忽略外部项目依赖的源码
 dependencies/
+.nanobot/

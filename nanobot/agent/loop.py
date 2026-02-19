@@ -53,7 +53,7 @@ class AgentLoop:
         cron_service: "CronService | None" = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
-        mcp_servers: dict | None = None,
+        config: "Config | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         from nanobot.cron.service import CronService
@@ -69,7 +69,8 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
-
+        self.config = config
+        
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
@@ -122,6 +123,13 @@ class AgentLoop:
         # Cron tool (for scheduling)
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+
+        # Integration tools (dynamically loaded from integrations/ directory)
+        if self.config:
+            from nanobot.agent.tools.integrations.loader import IntegrationLoader
+
+            loader = IntegrationLoader(workspace=self.workspace)
+            loader.load_all(self.tools, self.config.integrations)
     
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -318,38 +326,150 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="🐈 nanobot commands:\n/new — Start a new conversation\n/help — Show available commands")
         
-        if len(session.messages) > self.memory_window:
-            asyncio.create_task(self._consolidate_memory(session))
-
-        self._set_tool_context(msg.channel, msg.chat_id)
-        initial_messages = self.context.build_messages(
-            history=session.get_history(max_messages=self.memory_window),
+        spawn_tool = self.tools.get("spawn")
+        if isinstance(spawn_tool, SpawnTool):
+            spawn_tool.set_context(msg.channel, msg.chat_id)
+        
+        cron_tool = self.tools.get("cron")
+        if isinstance(cron_tool, CronTool):
+            cron_tool.set_context(msg.channel, msg.chat_id)
+        
+        # Build initial messages (use get_history for LLM-formatted messages)
+        history = session.get_history()
+        logger.debug(f"Session history: {len(history)} messages")
+        messages = self.context.build_messages(
+            history=history,
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel,
             chat_id=msg.chat_id,
         )
+        
+        # Agent loop
+        iteration = 0
+        final_content = None
 
-        async def _bus_progress(content: str) -> None:
-            await self.bus.publish_outbound(OutboundMessage(
-                channel=msg.channel, chat_id=msg.chat_id, content=content,
-                metadata=msg.metadata or {},
-            ))
+        tool_defs = self.tools.get_definitions()
+        tool_names = self.tools.tool_names
+        logger.debug(f"Agent loop start: {len(tool_names)} tools registered: {tool_names}")
+        used_tools = False
 
-        final_content, tools_used = await self._run_agent_loop(
-            initial_messages, on_progress=on_progress or _bus_progress,
-        )
+        while iteration < self.max_iterations:
+            iteration += 1
 
+            # Call LLM
+            response = await self.provider.chat(
+                messages=messages,
+                tools=tool_defs,
+                model=self.model
+            )
+
+            logger.debug(
+                f"LLM response (iter={iteration}): "
+                f"has_tool_calls={response.has_tool_calls}, "
+                f"finish_reason={response.finish_reason}, "
+                f"content_preview={repr(response.content[:100]) if response.content else 'None'}"
+            )
+
+            # Handle tool calls
+            if response.has_tool_calls:
+                used_tools = True
+                # Add assistant message with tool calls
+                tool_call_dicts = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments)  # Must be JSON string
+                        }
+                    }
+                    for tc in response.tool_calls
+                ]
+                messages = self.context.add_assistant_message(
+                    messages, response.content, tool_call_dicts
+                )
+                
+                # Execute tools
+                for tool_call in response.tool_calls:
+                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    logger.info(f"Tool call: {tool_call.name}({args_str[:200]})")
+                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    messages = self.context.add_tool_result(
+                        messages, tool_call.id, tool_call.name, result
+                    )
+            else:
+                # No tool calls — but on first iteration with tools available,
+                # retry once with tool_choice="required" to nudge the model
+                if iteration == 1 and tool_defs:
+                    logger.info(
+                        "First response had no tool calls, "
+                        "retrying with tool_choice=required"
+                    )
+                    response = await self.provider.chat(
+                        messages=messages,
+                        tools=tool_defs,
+                        model=self.model,
+                        tool_choice="required",
+                    )
+                    logger.debug(
+                        f"LLM retry response: "
+                        f"has_tool_calls={response.has_tool_calls}, "
+                        f"finish_reason={response.finish_reason}"
+                    )
+                    if response.has_tool_calls:
+                        used_tools = True
+                        # Process tool calls (same as above)
+                        tool_call_dicts = [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": json.dumps(tc.arguments)
+                                }
+                            }
+                            for tc in response.tool_calls
+                        ]
+                        messages = self.context.add_assistant_message(
+                            messages, response.content, tool_call_dicts
+                        )
+                        for tool_call in response.tool_calls:
+                            args_str = json.dumps(
+                                tool_call.arguments, ensure_ascii=False
+                            )
+                            logger.info(
+                                f"Tool call: {tool_call.name}({args_str[:200]})"
+                            )
+                            result = await self.tools.execute(
+                                tool_call.name, tool_call.arguments
+                            )
+                            messages = self.context.add_tool_result(
+                                messages, tool_call.id, tool_call.name, result
+                            )
+                        continue  # Continue the loop for the LLM to process results
+                # No tool calls, we're done
+                final_content = response.content
+                break
+        
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
         
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
         
-        session.add_message("user", msg.content)
-        session.add_message("assistant", final_content,
-                            tools_used=tools_used if tools_used else None)
-        self.sessions.save(session)
+        # Save to session — skip if no tools were used and response is a short
+        # placeholder (e.g. "正在查询..."), to avoid polluting history with
+        # unhelpful patterns that cause the LLM to repeat them.
+        if not used_tools and final_content and len(final_content) < 50:
+            logger.warning(
+                f"Skipping session save: short response without tool use "
+                f"({len(final_content)} chars)"
+            )
+        else:
+            session.add_message("user", msg.content)
+            session.add_message("assistant", final_content)
+            self.sessions.save(session)
         
         return OutboundMessage(
             channel=msg.channel,

@@ -6,6 +6,8 @@ import platform
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 
@@ -53,6 +55,7 @@ class ContextBuilder:
         # Skills - progressive loading
         # 1. Always-loaded skills: include full content
         always_skills = self.skills.get_always_skills()
+        logger.debug(f"Always-loaded skills: {always_skills}")
         if always_skills:
             always_content = self.skills.load_skills_for_context(always_skills)
             if always_content:
@@ -101,9 +104,12 @@ Your workspace is at: {workspace_path}
 - History log: {workspace_path}/memory/HISTORY.md (grep-searchable)
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
-IMPORTANT: When responding to direct questions or conversations, reply directly with your text response.
-Only use the 'message' tool when you need to send a message to a specific chat channel (like WhatsApp).
-For normal conversation, just respond with text - do not call the message tool.
+IMPORTANT: When responding to normal conversations or knowledge questions, reply directly with text.
+However, when the user's request matches an active skill workflow (see Active Skills below) or requires
+data retrieval, you MUST use the appropriate tools - do NOT reply with placeholder text like '正在查询...'
+without actually calling the tool.
+Only use the 'message' tool when sending to a different chat channel. For the current conversation,
+respond with text directly - do not use the message tool.
 
 Always be helpful, accurate, and concise. Before calling tools, briefly tell the user what you're about to do (one short sentence in the user's language).
 When remembering something important, write to {workspace_path}/memory/MEMORY.md
@@ -150,6 +156,7 @@ To recall past events, grep {workspace_path}/memory/HISTORY.md"""
         system_prompt = self.build_system_prompt(skill_names)
         if channel and chat_id:
             system_prompt += f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
+        logger.debug(f"System prompt length: {len(system_prompt)} chars")
         messages.append({"role": "system", "content": system_prompt})
 
         # History
