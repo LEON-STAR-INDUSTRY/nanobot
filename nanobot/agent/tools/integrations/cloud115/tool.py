@@ -1,7 +1,5 @@
 """Cloud115Tool: 115.com QR login + offline magnet download."""
 
-import asyncio
-import base64
 import json
 from pathlib import Path
 from typing import Any
@@ -22,7 +20,6 @@ class Cloud115Tool(Tool):
         self._session_path = Path(session_path) if session_path else None
         self._default_save_path = default_save_path
         self._client = None
-        self._login_uid: str | None = None
 
     @property
     def name(self) -> str:
@@ -85,36 +82,26 @@ class Cloud115Tool(Tool):
     # ------------------------------------------------------------------
 
     async def _do_login(self) -> str:
-        uid, qr_bytes = await self._generate_qr()
-        self._login_uid = uid
-        qr_b64 = base64.b64encode(qr_bytes).decode()
+        from p115client import P115Client
+
+        login_result = await P115Client.login_with_qrcode(
+            app="web",
+            console_qrcode=True,
+            async_=True,
+        )
+        cookies = login_result.get("data", {}).get("cookie", {})
+        await self._save_session(cookies)
+        self._client = P115Client(login_result)
         return json.dumps({
-            "status": "waiting_for_scan",
-            "qr_image_base64": qr_b64,
-            "instruction": "请使用115手机App扫描二维码登录。扫码后回复'已扫码'确认。",
+            "logged_in": True,
+            "message": "115 登录成功",
         }, ensure_ascii=False)
 
     async def _do_check_session(self) -> str:
-        # If there's a pending login, try to confirm it
-        if self._login_uid:
-            result = await self._poll_login_status()
-            if result.get("status") == "confirmed":
-                cookies = result.get("cookies", {})
-                await self._save_session(cookies)
-                self._client = await self._create_client(cookies)
-                self._login_uid = None
-                return json.dumps({"logged_in": True, "message": "登录成功"}, ensure_ascii=False)
-            else:
-                return json.dumps({
-                    "logged_in": False,
-                    "message": "等待扫码确认中...",
-                    "status": result.get("status", "unknown"),
-                }, ensure_ascii=False)
-
-        # Try to load existing session
+        # Try existing in-memory client
         if self._client:
             try:
-                info = await asyncio.to_thread(self._validate_client, self._client)
+                info = await self._validate_client(self._client)
                 if info:
                     return json.dumps({"logged_in": True, "user": info}, ensure_ascii=False)
             except Exception:
@@ -125,7 +112,7 @@ class Cloud115Tool(Tool):
                 session_data = json.loads(self._session_path.read_text())
                 cookies = session_data.get("cookies", {})
                 self._client = await self._create_client(cookies)
-                info = await asyncio.to_thread(self._validate_client, self._client)
+                info = await self._validate_client(self._client)
                 if info:
                     return json.dumps({"logged_in": True, "user": info}, ensure_ascii=False)
             except Exception as e:
@@ -200,63 +187,20 @@ class Cloud115Tool(Tool):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _generate_qr(self) -> tuple[str, bytes]:
-        """Generate QR code for login. Returns (uid, qr_image_bytes)."""
-        from p115client import P115Client
-
-        client = P115Client()
-        qr_info = await client.login_qrcode_token(async_=True)
-        uid = qr_info.get("data", {}).get("uid", "")
-        if not uid:
-            raise RuntimeError(f"Failed to get QR uid: {qr_info}")
-
-        import httpx
-
-        qr_url = f"https://qrcodeapi.115.com/api/1.0/mac/1.0/qrcode?uid={uid}"
-        async with httpx.AsyncClient() as http:
-            resp = await http.get(qr_url)
-            return uid, resp.content
-
-    async def _poll_login_status(self) -> dict:
-        """Poll for QR scan confirmation. Returns status dict."""
-        from p115client import P115Client
-
-        client = P115Client()
-        for _ in range(60):  # 120 seconds max
-            await asyncio.sleep(2)
-            resp = await client.login_qrcode_scan_status(
-                {"uid": self._login_uid}, async_=True
-            )
-            status = resp.get("data", {}).get("status", 0)
-            if status == 2:  # confirmed
-                login_result = await client.login_qrcode_scan_result(
-                    {"uid": self._login_uid, "app": "web"}, async_=True
-                )
-                cookies = login_result.get("data", {}).get("cookie", {})
-                return {"status": "confirmed", "cookies": cookies}
-            elif status in (-1, -2):
-                return {"status": "expired"}
-        return {"status": "timeout"}
-
     async def _create_client(self, cookies: dict):
         """Create P115Client from cookies dict."""
         from p115client import P115Client
 
         return P115Client(cookies, check_for_relogin=True)
 
-    def _validate_client(self, client) -> str | None:
-        """Validate client session synchronously. Returns user name or None."""
-        import asyncio
-
-        loop = asyncio.new_event_loop()
+    async def _validate_client(self, client) -> str | None:
+        """Validate client session. Returns user name or None."""
         try:
-            resp = loop.run_until_complete(client.user_info(async_=True))
+            resp = await client.user_info(async_=True)
             if resp.get("state"):
                 return resp.get("data", {}).get("user_name", "unknown")
         except Exception:
             pass
-        finally:
-            loop.close()
         return None
 
     async def _save_session(self, cookies: dict) -> None:

@@ -2,15 +2,16 @@
 title: GyingUpdatesTool - Summary
 filename: 12-gying_updates_tool.md
 status: Approved
-version: 1.0.0
+version: 1.1.0
 owner: AI Assistant
-last_updated: 2026-02-15
+last_updated: 2026-02-19
 ---
 
 ## Document History
 | Version | Date       | Author | Description of Changes |
 |---------|------------|--------|------------------------|
 | 1.0.0   | 2026-02-15 | Claude | Initial creation       |
+| 1.1.0   | 2026-02-19 | Claude | Added source param (manual/cron), max_results default 10→12, removed unused category param |
 
 ## Purpose & Scope
 > Summary of Task 12: Implement GyingUpdatesTool for daily new release checks.
@@ -23,18 +24,29 @@ Created `GyingUpdatesTool` class in `nanobot/agent/tools/gying.py` for checking 
 
 Key features:
 1. **Listing scrape**: Navigates to gying.org homepage and extracts movie listings using `ul.content-list li` selectors.
-2. **Deduplication**: Compares scraped URLs against `seen_movies.json` to identify new entries only.
-3. **Result limiting**: `max_results` parameter caps the number of new movies returned (default: 10).
-4. **State persistence**: After each check, updates `seen_movies.json` with newly discovered movies and a `last_check` timestamp.
+2. **Dual mode via `source` parameter**:
+   - `source="manual"`: Returns all listings without seen filtering, does not update `seen_movies.json`. For user-initiated queries.
+   - `source="cron"` (default): Filters by `seen_movies.json`, returns only new items, updates seen file. For scheduled tasks.
+3. **Result limiting**: `max_results` parameter caps the number of movies returned (default: 12, matching homepage count).
+4. **State persistence**: In cron mode, updates `seen_movies.json` with newly discovered movies and a `last_check` timestamp.
 5. **Shared browser**: Reuses `GyingScraperTool`'s Playwright browser instance to avoid launching multiple browsers.
 
-Return format:
+Return format (cron mode):
 ```json
 {
   "new_movies": [...],
-  "total_checked": 30,
-  "previously_seen": 27,
+  "total_checked": 12,
+  "previously_seen": 9,
   "new_count": 3
+}
+```
+
+Return format (manual mode):
+```json
+{
+  "movies": [...],
+  "total": 12,
+  "count": 12
 }
 ```
 

@@ -29,7 +29,10 @@
       "WebFetch(domain:www.semrush.com)",
       "WebFetch(domain:www.wappalyzer.com)",
       "WebFetch(domain:builtwith.com)",
-      "Bash(ruff check:*)"
+      "Bash(ruff check:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(git -C \"C:/Users/cowls-praxis-0h/projects/agents-89b3e9d799\" branch --show-current)",
+      "Bash(grep:*)"
     ]
   }
 }

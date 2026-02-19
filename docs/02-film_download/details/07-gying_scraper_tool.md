@@ -2,15 +2,16 @@
 title: GyingScraperTool - Summary
 filename: 07-gying_scraper_tool.md
 status: Approved
-version: 1.0.0
+version: 1.1.0
 owner: AI Assistant
-last_updated: 2026-02-15
+last_updated: 2026-02-19
 ---
 
 ## Document History
 | Version | Date       | Author | Description of Changes |
 |---------|------------|--------|------------------------|
 | 1.0.0   | 2026-02-15 | Claude | Initial creation       |
+| 1.1.0   | 2026-02-19 | Claude | Updated links action: tab-based quality filtering replaces text matching |
 
 ## Purpose & Scope
 > Summary of Task 7: Implement GyingScraperTool for Playwright-based gying.org scraping.
@@ -23,7 +24,7 @@ Created `GyingScraperTool`, a nanobot Tool that uses Playwright to scrape movie 
 
 1. **`search`**: Searches gying.org by keyword. Navigates to homepage, fills search input, presses Enter, and extracts up to 10 results (title, URL, rating).
 2. **`detail`**: Gets full movie detail from a detail page URL. Extracts title, year, Douban/IMDB ratings, genres, synopsis, and poster URL.
-3. **`links`**: Extracts magnet download links from a movie detail page. Supports optional quality filtering (e.g., "4K", "1080P") via filename text matching.
+3. **`links`**: Extracts magnet download links filtered by quality tab panels. Navigates the DOM tab→panel structure to extract links only from matching tabs (default: "中字4K" and "中字1080P"). Each link includes a `quality_tab` field indicating its source tab. Returns empty list if no matching tabs found.
 
 Key design decisions:
 - **Lazy browser launch**: Playwright browser is only started on first tool call via `_ensure_browser()`.
@@ -41,6 +42,7 @@ CSS Selector Map:
 | Detail title | `.main-ui-meta h1 div` |
 | Detail year | `.main-ui-meta h1 span.year` |
 | Detail rating | `.ratings-section .freshness` |
+| Download quality tabs | `.down-link .nav-tabs li` |
 | Download rows | `table.bit_list tbody tr` |
 | Magnet link | `a.torrent[href^="magnet:"]` |
 | Homepage items | `ul.content-list li` |
@@ -70,5 +72,5 @@ All 7 tests pass. No Playwright installation required for testing (internal meth
 
 - gying.org is a full SPA — HTTP fetch returns empty HTML. Playwright is mandatory.
 - The browser instance is shared across all actions within the same tool lifecycle. The `close()` method should be called when the tool is no longer needed.
-- Quality filtering is text-based: it checks if the quality string (e.g., "4K") appears in the download link name. This is simple but effective given gying.org's naming convention.
+- Quality filtering uses DOM tab→panel navigation: matches tab labels containing "中字4K"/"中字1080P", then extracts rows only from matched panels. This avoids confusion with bare "4K"/"1080P" tabs. See `18-quality_tab_filtering_and_update_modes.md` for details.
 - Homepage listing selectors (for Scenario B) are validated but not yet used by this tool — they will be used by `GyingUpdatesTool` (Task 12).

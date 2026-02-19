@@ -20,3 +20,4 @@ tests/
 
 # 忽略外部项目依赖的源码
 dependencies/
+.nanobot/

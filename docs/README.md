@@ -15,3 +15,5 @@
 - `02-film_download/details/05-scenario_a_integration.md` — Scenario A end-to-end test results (pending)
 - `02-film_download/details/06-scenario_b_cron_setup.md` — Scenario B cron configuration results (pending)
 - `02-film_download/details/07-final_integration.md` — Final integration test and documentation (pending)
+- `02-film_download/details/18-quality_tab_filtering_and_update_modes.md` — Quality tab filtering & update modes refactor | Approved | 2026-02-19
+- `02-film_download/details/19-data_persistence_and_multi_turn_memory.md` — 数据持久化与多轮记忆机制 | Approved | 2026-02-19

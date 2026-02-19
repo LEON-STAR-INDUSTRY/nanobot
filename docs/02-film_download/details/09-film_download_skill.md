@@ -2,15 +2,16 @@
 title: Film Download Skill - Summary
 filename: 09-film_download_skill.md
 status: Approved
-version: 1.0.0
+version: 1.1.0
 owner: AI Assistant
-last_updated: 2026-02-15
+last_updated: 2026-02-19
 ---
 
 ## Document History
 | Version | Date       | Author | Description of Changes |
 |---------|------------|--------|------------------------|
 | 1.0.0   | 2026-02-15 | Claude | Initial creation       |
+| 1.1.0   | 2026-02-19 | Claude | Added anti-fabrication rules, manual/cron distinction, ordering constraint |
 
 ## Purpose & Scope
 > Summary of Task 9: Create the Film Download orchestration skill for Scenario A and B.
@@ -23,10 +24,14 @@ Created `nanobot/skills/film-download/SKILL.md`, a markdown-based orchestration 
 
 The skill covers:
 1. **Scenario A (Pull)**: User-initiated search flow — search → detail → links → login → download
-2. **Scenario B (Push)**: Cron-triggered daily check — check updates → notify → user selects → continue as Scenario A
-3. **Cron setup**: Instructions for creating daily check jobs when user requests it
-4. **Error handling**: Chinese error messages for all failure modes
-5. **Interaction conventions**: Number-based selection, resolution preferences, short reply interpretation
+2. **Scenario B (Push/Manual)**: Supports both cron-triggered and user-initiated latest movie queries
+   - User manual query (`source="manual"`): returns all listings without seen filtering
+   - Cron trigger (`source="cron"`): returns only new unseen items
+3. **Anti-fabrication rules**: Strict instructions prohibiting LLM from fabricating download links or movie lists
+4. **Ordering constraint**: Results must be displayed in original tool-returned order, no reordering allowed
+5. **Cron setup**: Instructions for creating daily check jobs when user requests it
+6. **Error handling**: Chinese error messages for all failure modes
+7. **Interaction conventions**: Number-based selection, resolution preferences, short reply interpretation
 
 The skill references three tools: `gying_search`, `gying_check_updates`, and `cloud115`.
 

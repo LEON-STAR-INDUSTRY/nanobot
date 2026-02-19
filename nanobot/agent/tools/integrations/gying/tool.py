@@ -42,9 +42,11 @@ class GyingScraperTool(Tool):
         self,
         browser_data_dir: str = "",
         headless: bool = True,
+        seen_file: str = "",
     ):
         self._browser_data_dir = browser_data_dir
         self._headless = headless
+        self._seen_file = Path(seen_file) if seen_file else None
         self._pw = None
         self._browser = None
         self._page = None
@@ -60,7 +62,9 @@ class GyingScraperTool(Tool):
             "Search and scrape movie information from gying.org. Actions: "
             "search (search movies by keyword), "
             "detail (get movie detail info by URL), "
-            "links (get download magnet links for a movie)."
+            "links (get download magnet links for a movie), "
+            "select (resolve a numbered movie selection from the last query results), "
+            "select_link (resolve a numbered download link selection from the last links results)."
         )
 
     @property
@@ -70,7 +74,7 @@ class GyingScraperTool(Tool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["search", "detail", "links"],
+                    "enum": ["search", "detail", "links", "select", "select_link"],
                     "description": "Action to perform.",
                 },
                 "query": {
@@ -84,6 +88,10 @@ class GyingScraperTool(Tool):
                 "quality": {
                     "type": "string",
                     "description": "Quality tab filter: '4K' (中字4K tab), '1080P' (中字1080P tab), or empty for both.",
+                },
+                "index": {
+                    "type": "integer",
+                    "description": "1-based index from the last query results (required for select).",
                 },
             },
             "required": ["action"],
@@ -99,6 +107,7 @@ class GyingScraperTool(Tool):
                         {"error": "缺少query参数，请提供搜索关键词"}, ensure_ascii=False
                     )
                 results = await self._search(query)
+                self._update_cache(results)
                 return json.dumps({"results": results}, ensure_ascii=False)
             elif action == "detail":
                 url = kwargs.get("url", "")
@@ -123,7 +132,22 @@ class GyingScraperTool(Tool):
                 else:
                     quality_tabs = None  # Default: both 中字4K + 中字1080P
                 links = await self._links(url, quality_tabs=quality_tabs)
+                self._update_links_cache(links)
                 return json.dumps({"links": links}, ensure_ascii=False)
+            elif action == "select":
+                index = kwargs.get("index", 0)
+                if not index:
+                    return json.dumps(
+                        {"error": "缺少index参数，请提供序号"}, ensure_ascii=False
+                    )
+                return self._select_from_cache(index)
+            elif action == "select_link":
+                index = kwargs.get("index", 0)
+                if not index:
+                    return json.dumps(
+                        {"error": "缺少index参数，请提供序号"}, ensure_ascii=False
+                    )
+                return self._select_link_from_cache(index)
             else:
                 return json.dumps({"error": f"未知操作: {action}"}, ensure_ascii=False)
         except Exception as e:
@@ -137,9 +161,15 @@ class GyingScraperTool(Tool):
     # ------------------------------------------------------------------
 
     async def _ensure_browser(self):
-        """Lazy-launch browser on first use."""
+        """Lazy-launch browser on first use.  Recovers if browser died."""
         if self._page:
-            return
+            # Verify the page is still usable
+            try:
+                await self._page.evaluate("1")
+                return
+            except Exception:
+                logger.warning("Browser page is stale, relaunching")
+                await self.close()
 
         from playwright.async_api import async_playwright
 
@@ -210,6 +240,138 @@ class GyingScraperTool(Tool):
         if self._pw:
             await self._pw.stop()
             self._pw = None
+
+    # ------------------------------------------------------------------
+    # Movie cache (seen_movies.json) methods
+    # ------------------------------------------------------------------
+
+    def _update_cache(self, results: list[dict]) -> None:
+        """Update seen_movies.json with search results and set last_query index."""
+        if not self._seen_file:
+            return
+        try:
+            if self._seen_file.exists():
+                data = json.loads(self._seen_file.read_text(encoding="utf-8"))
+            else:
+                data = {"movies": {}, "last_check": ""}
+
+            movies_dict = data.get("movies", {})
+            now = datetime.now(timezone.utc).isoformat()
+            urls = []
+
+            for item in results:
+                url = item.get("url", "")
+                if not url:
+                    continue
+                urls.append(url)
+                existing = movies_dict.get(url, {})
+                movies_dict[url] = {
+                    "title": item.get("title", ""),
+                    "rating": item.get("rating", existing.get("rating", "")),
+                    "tag": item.get("tag", existing.get("tag", "")),
+                    "first_seen": existing.get("first_seen", now[:10]),
+                    "notified": existing.get("notified", False),
+                }
+
+            data["movies"] = movies_dict
+            data["last_query"] = {
+                "timestamp": now,
+                "urls": urls,
+            }
+
+            self._seen_file.parent.mkdir(parents=True, exist_ok=True)
+            self._seen_file.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to update movie cache: {e}")
+
+    def _select_from_cache(self, index: int) -> str:
+        """Resolve a numbered selection from last_query."""
+        if not self._seen_file or not self._seen_file.exists():
+            return json.dumps(
+                {"error": "没有缓存的查询结果，请先查询最新影片"}, ensure_ascii=False
+            )
+        try:
+            data = json.loads(self._seen_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return json.dumps(
+                {"error": "缓存数据读取失败"}, ensure_ascii=False
+            )
+
+        last_query = data.get("last_query")
+        if not last_query:
+            return json.dumps(
+                {"error": "没有缓存的查询结果，请先查询最新影片"}, ensure_ascii=False
+            )
+
+        urls = last_query.get("urls", [])
+        if index < 1 or index > len(urls):
+            return json.dumps(
+                {"error": f"序号无效，有效范围 1-{len(urls)}"}, ensure_ascii=False
+            )
+
+        url = urls[index - 1]
+        movies = data.get("movies", {})
+        movie_info = movies.get(url, {})
+
+        return json.dumps({
+            "url": url,
+            "title": movie_info.get("title", ""),
+            "rating": movie_info.get("rating", ""),
+            "tag": movie_info.get("tag", ""),
+        }, ensure_ascii=False)
+
+    def _update_links_cache(self, links: list[dict]) -> None:
+        """Cache download links to seen_movies.json last_links for cross-turn access."""
+        if not self._seen_file:
+            return
+        try:
+            if self._seen_file.exists():
+                data = json.loads(self._seen_file.read_text(encoding="utf-8"))
+            else:
+                data = {"movies": {}, "last_check": ""}
+
+            now = datetime.now(timezone.utc).isoformat()
+            data["last_links"] = {
+                "timestamp": now,
+                "links": links,
+            }
+
+            self._seen_file.parent.mkdir(parents=True, exist_ok=True)
+            self._seen_file.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to update links cache: {e}")
+
+    def _select_link_from_cache(self, index: int) -> str:
+        """Resolve a numbered download link selection from last_links."""
+        if not self._seen_file or not self._seen_file.exists():
+            return json.dumps(
+                {"error": "没有缓存的下载链接，请先获取下载链接"}, ensure_ascii=False
+            )
+        try:
+            data = json.loads(self._seen_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return json.dumps(
+                {"error": "缓存数据读取失败"}, ensure_ascii=False
+            )
+
+        last_links = data.get("last_links")
+        if not last_links:
+            return json.dumps(
+                {"error": "没有缓存的下载链接，请先获取下载链接"}, ensure_ascii=False
+            )
+
+        links = last_links.get("links", [])
+        if index < 1 or index > len(links):
+            return json.dumps(
+                {"error": f"序号无效，有效范围 1-{len(links)}"}, ensure_ascii=False
+            )
+
+        link = links[index - 1]
+        return json.dumps(link, ensure_ascii=False)
 
     # ------------------------------------------------------------------
     # Scraping methods
@@ -290,7 +452,13 @@ class GyingScraperTool(Tool):
     QUALITY_TABS = ["中字4K", "中字1080P"]
 
     async def _links(self, url: str, quality_tabs: list[str] | None = None) -> list[dict]:
-        """Get magnet download links filtered by quality tab panels.
+        """Get magnet download links filtered by quality tab.
+
+        The page uses a single <table class="bit_list"> with <tr> rows toggled
+        visible/hidden by JavaScript when a tab <li> is clicked.  There are NO
+        separate panel divs and NO <a> elements inside the tab <li>.
+
+        Strategy: for each target tab, click it, then scrape visible rows.
 
         Args:
             url: Movie detail page URL.
@@ -313,38 +481,33 @@ class GyingScraperTool(Tool):
 
         target_tabs = quality_tabs or self.QUALITY_TABS
 
-        # Step 1: Find all tab elements and match target labels
+        # Step 1: Find tab <li> elements matching target labels
         tab_els = await page.query_selector_all(SELECTORS["download_quality_tabs"])
-        matched_panels = []  # [(panel_selector, tab_label)]
+        matched_tabs = []  # [(element, tab_label)]
         for tab_el in tab_els:
             tab_text = (await tab_el.inner_text()).strip()
+            # Remove badge number, e.g. "中字1080P 3" → compare with "中字1080P"
             for target in target_tabs:
                 if target in tab_text:
-                    # Find the <a> inside the tab <li> to get panel reference
-                    a_el = await tab_el.query_selector("a")
-                    if not a_el:
-                        continue
-                    panel_id = (
-                        await a_el.get_attribute("href")
-                        or await a_el.get_attribute("data-bs-target")
-                        or await a_el.get_attribute("data-target")
-                        or ""
-                    )
-                    if panel_id.startswith("#"):
-                        matched_panels.append((panel_id, target))
+                    matched_tabs.append((tab_el, target))
                     break
 
-        if not matched_panels:
+        if not matched_tabs:
             logger.info(f"No matching quality tabs found on {url} (wanted: {target_tabs})")
             return []
 
-        # Step 2: Extract links from each matched panel
+        # Step 2: Click each tab and scrape visible rows
         links = []
-        for panel_selector, tab_label in matched_panels:
-            rows = await page.query_selector_all(
-                f"{panel_selector} {SELECTORS['download_rows']}"
-            )
+        for tab_el, tab_label in matched_tabs:
+            await tab_el.click()
+            # Brief wait for JS to toggle row visibility
+            await page.wait_for_timeout(300)
+
+            rows = await page.query_selector_all(SELECTORS["download_rows"])
             for row in rows:
+                # Skip hidden rows (display: none)
+                if not await row.is_visible():
+                    continue
                 magnet_el = await row.query_selector(SELECTORS["magnet_link"])
                 if not magnet_el:
                     continue
@@ -414,8 +577,35 @@ class GyingUpdatesTool(Tool):
             listing = await self._scrape_listing()
 
             if source == "manual":
-                # Manual query: return all listings in original order, no seen filtering
+                # Manual query: return all listings, update global registry + last_query
                 movies = listing[:max_results]
+                seen_data = self._load_seen()
+                movies_dict = seen_data.get("movies", {})
+                now = datetime.now(timezone.utc).isoformat()
+                urls = []
+
+                for movie in movies:
+                    url = movie.get("url", "")
+                    if not url:
+                        continue
+                    urls.append(url)
+                    existing = movies_dict.get(url, {})
+                    movies_dict[url] = {
+                        "title": movie.get("title", ""),
+                        "rating": movie.get("rating", ""),
+                        "tag": movie.get("tag", ""),
+                        "first_seen": existing.get("first_seen", now[:10]),
+                        "notified": existing.get("notified", False),
+                    }
+
+                seen_data["movies"] = movies_dict
+                seen_data["last_query"] = {
+                    "timestamp": now,
+                    "urls": urls,
+                }
+                self._cleanup_seen(seen_data)
+                self._save_seen(seen_data)
+
                 return json.dumps({
                     "movies": movies,
                     "total": len(listing),
@@ -446,6 +636,8 @@ class GyingUpdatesTool(Tool):
                 if url:
                     movies_dict[url] = {
                         "title": movie.get("title", ""),
+                        "rating": movie.get("rating", ""),
+                        "tag": movie.get("tag", ""),
                         "first_seen": now[:10],
                         "notified": True,
                     }
@@ -466,6 +658,10 @@ class GyingUpdatesTool(Tool):
             return json.dumps(
                 {"error": f"检查更新失败: {type(e).__name__}: {e}"}, ensure_ascii=False
             )
+        finally:
+            # Release Chrome profile lock so gying_search can use the same user-data-dir
+            if self._scraper:
+                await self._scraper.close()
 
     async def _scrape_listing(self) -> list[dict]:
         """Scrape the homepage listing from gying.org."""
@@ -511,12 +707,14 @@ class GyingUpdatesTool(Tool):
         except (json.JSONDecodeError, OSError):
             return {"movies": {}, "last_check": ""}
 
-    def _cleanup_seen(self, data: dict, max_age_days: int = 90) -> None:
-        """Remove entries older than max_age_days from seen data (in-place)."""
+    def _cleanup_seen(self, data: dict, max_entries: int = 100, max_age_days: int = 90) -> None:
+        """Remove entries older than max_age_days and cap at max_entries."""
         movies = data.get("movies", {})
         if not movies:
             return
         today = datetime.now(timezone.utc).date()
+
+        # Remove entries older than max_age_days
         to_remove = []
         for url, info in movies.items():
             first_seen = info.get("first_seen", "")
@@ -530,6 +728,15 @@ class GyingUpdatesTool(Tool):
                 continue
         for url in to_remove:
             del movies[url]
+
+        # Cap at max_entries (remove oldest first)
+        if len(movies) > max_entries:
+            sorted_entries = sorted(
+                movies.items(),
+                key=lambda x: x[1].get("first_seen", ""),
+            )
+            for url, _ in sorted_entries[:len(movies) - max_entries]:
+                del movies[url]
 
     def _save_seen(self, data: dict) -> None:
         """Save seen_movies.json."""
@@ -550,6 +757,9 @@ TOOLS = [
         "config_map": {
             "browser_data_dir": "browser_data_dir",
             "headless": "headless",
+        },
+        "workspace_fields": {
+            "seen_file": "film_download/seen_movies.json",
         },
     },
     {

@@ -2,9 +2,9 @@
 title: Film Download - Quick Start Guide
 filename: QUICK_START.md
 status: Approved
-version: 1.1.0
+version: 1.2.0
 owner: AI Assistant
-last_updated: 2026-02-16
+last_updated: 2026-02-19
 ---
 
 ## Document History
@@ -12,6 +12,7 @@ last_updated: 2026-02-16
 |---------|------------|--------|------------------------|
 | 1.0.0   | 2026-02-16 | Claude | Initial creation       |
 | 1.1.0   | 2026-02-16 | Claude | Update import paths after integration refactoring |
+| 1.2.0   | 2026-02-19 | Claude | Remove hardcoded provider/model; template only contains integration-specific config |
 
 ## Purpose & Scope
 > 快速验证影片搜索下载功能模块的端到端指南。
@@ -23,25 +24,24 @@ last_updated: 2026-02-16
 - Python 3.11+，已安装 nanobot (`pip install -e ".[dev]"`)
 - Playwright 浏览器已安装 (`playwright install chromium`)
 - p115client 已安装 (`pip install p115client`)
+- nanobot 已完成初始化 (`nanobot onboard`)，`~/.nanobot/config.json` 已存在且 LLM provider 可用
 - 飞书应用已创建，具备消息收发权限
 - 115 手机 App 可用（用于扫码登录）
 
 ## Step 1: 配置 config.json
 
-将 `docs/02-film_download/config_template.json` 复制到 `~/.nanobot/config.json`，替换占位符：
+> **注意：** `docs/02-film_download/config.json` 是完整的配置参考文件（含 agents/providers/channels/integrations 全部段）。`config_template.json` 仅包含影片下载新增的配置片段。
 
-```bash
-cp docs/02-film_download/config_template.json ~/.nanobot/config.json
-```
+将 `integrations` 和 `channels.feishu` 配置段**合并**到已有的 `~/.nanobot/config.json` 中。完整配置参考 `docs/02-film_download/config.json`。
 
-需要替换的值：
+需要根据自身环境替换的值：
 
-| 占位符 | 说明 | 获取方式 |
+| 配置项 | 说明 | 获取方式 |
 |--------|------|----------|
-| `<YOUR_ANTHROPIC_API_KEY>` | Anthropic API Key | https://console.anthropic.com |
-| `<YOUR_FEISHU_APP_ID>` | 飞书应用 App ID | 飞书开放平台 → 应用管理 |
-| `<YOUR_FEISHU_APP_SECRET>` | 飞书应用 App Secret | 同上 |
-| `<YOUR_FEISHU_OPEN_ID>` | 你的飞书 Open ID | 飞书 API 调试台获取 |
+| `agents.defaults.model` | LLM 模型标识 | 根据所用 provider 选择 |
+| `providers.*` | LLM provider API key | 对应 provider 平台获取 |
+| `channels.feishu.appId` | 飞书应用 App ID | 飞书开放平台 → 应用管理 |
+| `channels.feishu.appSecret` | 飞书应用 App Secret | 同上 |
 
 ## Step 2: 验证配置加载
 
@@ -49,33 +49,78 @@ cp docs/02-film_download/config_template.json ~/.nanobot/config.json
 nanobot status
 ```
 
-预期输出：应显示模型、API key 状态。没有报错即可。
+预期输出：应显示模型、至少一个 LLM provider API key 状态为 ✓。没有报错即可。
 
-进一步确认 integrations 已生效：
+进一步确认 integrations 和 provider 已生效：
 
 ```bash
 python -c "
 from nanobot.config import load_config
 c = load_config()
+print(f'model: {c.agents.defaults.model}')
+p = c.get_provider()
+print(f'provider resolved: {p is not None}')
+print(f'api_base: {c.get_api_base()}')
 print(f'cloud115 enabled: {c.integrations.cloud115.enabled}')
 print(f'gying enabled: {c.integrations.gying.enabled}')
 print(f'feishu enabled: {c.channels.feishu.enabled}')
 "
 ```
 
-三项都应为 `True`。
+- `provider resolved` 应为 `True`（如果为 `False`，检查 providers 配置）
+- 三项 `enabled` 都应为 `True`
 
 ## Step 3: 验证 gying.org 抓取
 
-用 `headless: false` 测试浏览器能否正常工作（临时修改 config 或直接用脚本）：
+gying.org 需要登录才能使用。首次运行必须使用 `browser_data_dir` 持久化 cookies，并在浏览器中手动完成登录。
+
+**Step 3a: 首次登录（仅需一次）**
 
 ```bash
 python -c "
 import asyncio
+from pathlib import Path
+from playwright.async_api import async_playwright
+
+BROWSER_DIR = str(Path.home() / '.nanobot' / 'browser_data' / 'gying')
+
+async def login():
+    pw = await async_playwright().start()
+    browser = await pw.chromium.launch_persistent_context(
+        BROWSER_DIR,
+        headless=False,
+        locale='zh-CN',
+        viewport={'width': 1280, 'height': 800},
+    )
+    page = browser.pages[0] if browser.pages else await browser.new_page()
+    await page.goto('https://www.gying.org/')
+    print('请在浏览器中完成登录，登录成功后按回车继续...')
+    input()
+    await browser.close()
+    await pw.stop()
+    print('登录 cookies 已保存到', BROWSER_DIR)
+
+asyncio.run(login())
+"
+```
+
+> 登录完成后 cookies 会保存在 `~/.nanobot/browser_data/gying/` 目录中，后续运行自动复用。
+
+**Step 3b: 验证搜索功能**
+
+```bash
+python -c "
+import asyncio
+from pathlib import Path
 from nanobot.agent.tools.integrations.gying.tool import GyingScraperTool
 
+BROWSER_DIR = str(Path.home() / '.nanobot' / 'browser_data' / 'gying')
+
 async def test():
-    tool = GyingScraperTool(headless=False)
+    tool = GyingScraperTool(
+        browser_data_dir=BROWSER_DIR,
+        headless=False,
+    )
     result = await tool.execute(action='search', query='沙丘')
     print(result)
     await tool.close()
@@ -85,13 +130,13 @@ asyncio.run(test())
 ```
 
 **预期结果：**
-- 浏览器窗口弹出，访问 gying.org
+- 浏览器窗口弹出，自动使用已保存的登录状态
 - 搜索"沙丘"
 - 返回 JSON 格式的搜索结果列表
 - 每条结果包含 `title`、`url`、`rating`
 
 **常见问题：**
-- 如果搜索框找不到：检查 gying.org 是否改版
+- 如果提示"gying.org 未登录"：重新执行 Step 3a 完成登录
 - 如果浏览器启动失败：运行 `playwright install chromium`
 - 如果被反爬：安装 `pip install playwright-stealth`
 
@@ -100,18 +145,19 @@ asyncio.run(test())
 ```bash
 python -c "
 import asyncio
+from pathlib import Path
 from nanobot.agent.tools.integrations.cloud115.tool import Cloud115Tool
 
+SESSION_PATH = str(Path.home() / '.nanobot' / 'cloud115_session.json')
+
 async def test():
-    tool = Cloud115Tool(session_path='$HOME/.nanobot/cloud115_session.json')
+    tool = Cloud115Tool(session_path=SESSION_PATH)
 
-    # Step 1: 生成二维码
+    # 登录：终端会显示二维码，用115 App扫码
     result = await tool.execute(action='login')
-    print(result[:200])
-    print('... 请用115 App扫描二维码 ...')
+    print(result)
 
-    # Step 2: 等待你扫码后，运行检查
-    input('扫码完成后按回车继续...')
+    # 验证 session
     result = await tool.execute(action='check_session')
     print(result)
 
@@ -120,8 +166,8 @@ asyncio.run(test())
 ```
 
 **预期结果：**
-- 返回包含 `qr_image_base64` 的 JSON
-- 扫码后 `check_session` 返回 `{"logged_in": true}`
+- 终端显示二维码，使用 115 手机 App 扫码
+- 扫码确认后自动完成登录，输出 `{"logged_in": true, "message": "115 登录成功"}`
 - `~/.nanobot/cloud115_session.json` 文件已创建
 
 ## Step 5: 验证飞书通道
@@ -197,6 +243,7 @@ cat ~/.nanobot/workspace/film_download/seen_movies.json
 
 | 问题 | 排查方向 |
 |------|----------|
+| LLM 调用失败 (AuthenticationError) | 运行 `nanobot status` 确认 provider API key 状态为 ✓；确保 config.json 中 `agents.defaults.model` 与 `providers` 中配置的 key 匹配 |
 | `gying_search` 工具未注册 | 检查 config.json 中 `integrations.gying.enabled` 是否为 `true` |
 | `cloud115` 工具未注册 | 检查 config.json 中 `integrations.cloud115.enabled` 是否为 `true` |
 | 飞书收不到消息 | 检查 `channels.feishu.enabled`、appId/appSecret 是否正确 |

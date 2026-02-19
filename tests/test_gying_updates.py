@@ -96,6 +96,8 @@ async def test_gying_updates_saves_seen():
     saved = json.loads(Path(seen_path).read_text(encoding="utf-8"))
     assert "/mv/NEW" in saved["movies"]
     assert saved["movies"]["/mv/NEW"]["title"] == "新片 (2026)"
+    assert saved["movies"]["/mv/NEW"]["rating"] == "7.5"
+    assert saved["movies"]["/mv/NEW"]["tag"] == "1080P"
     assert saved["last_check"] != ""
 
     Path(seen_path).unlink(missing_ok=True)
@@ -188,12 +190,12 @@ async def test_gying_updates_cleanup_removes_old():
 
 @pytest.mark.asyncio
 async def test_gying_updates_manual_returns_all():
-    """source='manual' returns all listings without seen filtering."""
+    """source='manual' returns all listings and writes to global registry + last_query."""
     from nanobot.agent.tools.integrations.gying.tool import GyingUpdatesTool
 
     seen_path = _write_seen_file({
         "movies": {
-            "/mv/AAA": {"title": "沙丘3", "first_seen": "2026-02-14", "notified": True},
+            "/mv/AAA": {"title": "沙丘3", "rating": "8.7", "tag": "4K", "first_seen": "2026-02-14", "notified": True},
         },
         "last_check": "2026-02-14T09:00:00",
     })
@@ -221,9 +223,89 @@ async def test_gying_updates_manual_returns_all():
         assert data["movies"][1]["title"] == "黑暗骑士 (2026)"
         assert data["movies"][2]["title"] == "流浪地球3 (2026)"
 
-    # Seen file should NOT be updated (manual mode)
+    # Seen file SHOULD be updated (global registry + last_query)
     saved = json.loads(Path(seen_path).read_text(encoding="utf-8"))
-    assert "/mv/BBB" not in saved["movies"]  # New items not added to seen
-    assert saved["last_check"] == "2026-02-14T09:00:00"  # Unchanged
+    # All movies written to global registry
+    assert "/mv/AAA" in saved["movies"]
+    assert "/mv/BBB" in saved["movies"]
+    assert "/mv/CCC" in saved["movies"]
+    # Existing entry preserves notified=True and first_seen
+    assert saved["movies"]["/mv/AAA"]["notified"] is True
+    assert saved["movies"]["/mv/AAA"]["first_seen"] == "2026-02-14"
+    # New entries have notified=False
+    assert saved["movies"]["/mv/BBB"]["notified"] is False
+    assert saved["movies"]["/mv/CCC"]["notified"] is False
+    # Rating and tag persisted
+    assert saved["movies"]["/mv/BBB"]["rating"] == "9.1"
+    assert saved["movies"]["/mv/BBB"]["tag"] == "1080P"
+    # last_query written with ordered URLs
+    assert "last_query" in saved
+    assert saved["last_query"]["urls"] == ["/mv/AAA", "/mv/BBB", "/mv/CCC"]
+
+    Path(seen_path).unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+async def test_gying_updates_manual_preserves_existing():
+    """Manual mode doesn't overwrite first_seen or notified on existing entries."""
+    from nanobot.agent.tools.integrations.gying.tool import GyingUpdatesTool
+
+    seen_path = _write_seen_file({
+        "movies": {
+            "/mv/AAA": {"title": "Old Title", "rating": "7.0", "tag": "4K", "first_seen": "2026-01-01", "notified": True},
+        },
+        "last_check": "2026-02-14T09:00:00",
+    })
+    tool = GyingUpdatesTool(seen_file=seen_path)
+    mock_listing = [
+        {"title": "Updated Title (2026)", "url": "/mv/AAA", "rating": "8.5", "tag": "4K"},
+    ]
+    with patch.object(tool, "_scrape_listing", new_callable=AsyncMock) as mock:
+        mock.return_value = mock_listing
+        await tool.execute(source="manual")
+
+    saved = json.loads(Path(seen_path).read_text(encoding="utf-8"))
+    entry = saved["movies"]["/mv/AAA"]
+    # Title and rating updated to latest
+    assert entry["title"] == "Updated Title (2026)"
+    assert entry["rating"] == "8.5"
+    # first_seen and notified preserved from original
+    assert entry["first_seen"] == "2026-01-01"
+    assert entry["notified"] is True
+
+    Path(seen_path).unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+async def test_gying_updates_cleanup_caps_at_100():
+    """Cleanup caps movies at 100 entries, removing oldest first."""
+    from nanobot.agent.tools.integrations.gying.tool import GyingUpdatesTool
+
+    # Create 105 existing entries with sequential dates
+    existing_movies = {}
+    for i in range(105):
+        day = f"2026-01-{(i % 28) + 1:02d}"
+        existing_movies[f"/mv/{i:04d}"] = {
+            "title": f"Movie {i}",
+            "rating": "7.0",
+            "tag": "1080P",
+            "first_seen": day,
+            "notified": True,
+        }
+
+    seen_path = _write_seen_file({"movies": existing_movies, "last_check": ""})
+    tool = GyingUpdatesTool(seen_file=seen_path)
+    mock_listing = [
+        {"title": "Brand New (2026)", "url": "/mv/NEW1", "rating": "8.0", "tag": "4K"},
+    ]
+    with patch.object(tool, "_scrape_listing", new_callable=AsyncMock) as mock:
+        mock.return_value = mock_listing
+        await tool.execute(source="cron")
+
+    saved = json.loads(Path(seen_path).read_text(encoding="utf-8"))
+    # Should be capped at 100 (105 existing - removed oldest + 1 new)
+    assert len(saved["movies"]) <= 100
+    # New entry should be present
+    assert "/mv/NEW1" in saved["movies"]
 
     Path(seen_path).unlink(missing_ok=True)
