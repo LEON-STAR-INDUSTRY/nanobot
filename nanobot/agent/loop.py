@@ -185,8 +185,10 @@ class AgentLoop:
             cron_tool.set_context(msg.channel, msg.chat_id)
         
         # Build initial messages (use get_history for LLM-formatted messages)
+        history = session.get_history()
+        logger.debug(f"Session history: {len(history)} messages")
         messages = self.context.build_messages(
-            history=session.get_history(),
+            history=history,
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel,
@@ -197,8 +199,10 @@ class AgentLoop:
         iteration = 0
         final_content = None
 
+        tool_defs = self.tools.get_definitions()
         tool_names = self.tools.tool_names
         logger.debug(f"Agent loop start: {len(tool_names)} tools registered: {tool_names}")
+        used_tools = False
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -206,7 +210,7 @@ class AgentLoop:
             # Call LLM
             response = await self.provider.chat(
                 messages=messages,
-                tools=self.tools.get_definitions(),
+                tools=tool_defs,
                 model=self.model
             )
 
@@ -216,9 +220,10 @@ class AgentLoop:
                 f"finish_reason={response.finish_reason}, "
                 f"content_preview={repr(response.content[:100]) if response.content else 'None'}"
             )
-            
+
             # Handle tool calls
             if response.has_tool_calls:
+                used_tools = True
                 # Add assistant message with tool calls
                 tool_call_dicts = [
                     {
@@ -244,6 +249,55 @@ class AgentLoop:
                         messages, tool_call.id, tool_call.name, result
                     )
             else:
+                # No tool calls — but on first iteration with tools available,
+                # retry once with tool_choice="required" to nudge the model
+                if iteration == 1 and tool_defs:
+                    logger.info(
+                        "First response had no tool calls, "
+                        "retrying with tool_choice=required"
+                    )
+                    response = await self.provider.chat(
+                        messages=messages,
+                        tools=tool_defs,
+                        model=self.model,
+                        tool_choice="required",
+                    )
+                    logger.debug(
+                        f"LLM retry response: "
+                        f"has_tool_calls={response.has_tool_calls}, "
+                        f"finish_reason={response.finish_reason}"
+                    )
+                    if response.has_tool_calls:
+                        used_tools = True
+                        # Process tool calls (same as above)
+                        tool_call_dicts = [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": json.dumps(tc.arguments)
+                                }
+                            }
+                            for tc in response.tool_calls
+                        ]
+                        messages = self.context.add_assistant_message(
+                            messages, response.content, tool_call_dicts
+                        )
+                        for tool_call in response.tool_calls:
+                            args_str = json.dumps(
+                                tool_call.arguments, ensure_ascii=False
+                            )
+                            logger.info(
+                                f"Tool call: {tool_call.name}({args_str[:200]})"
+                            )
+                            result = await self.tools.execute(
+                                tool_call.name, tool_call.arguments
+                            )
+                            messages = self.context.add_tool_result(
+                                messages, tool_call.id, tool_call.name, result
+                            )
+                        continue  # Continue the loop for the LLM to process results
                 # No tool calls, we're done
                 final_content = response.content
                 break
@@ -255,10 +309,18 @@ class AgentLoop:
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info(f"Response to {msg.channel}:{msg.sender_id}: {preview}")
         
-        # Save to session
-        session.add_message("user", msg.content)
-        session.add_message("assistant", final_content)
-        self.sessions.save(session)
+        # Save to session — skip if no tools were used and response is a short
+        # placeholder (e.g. "正在查询..."), to avoid polluting history with
+        # unhelpful patterns that cause the LLM to repeat them.
+        if not used_tools and final_content and len(final_content) < 50:
+            logger.warning(
+                f"Skipping session save: short response without tool use "
+                f"({len(final_content)} chars)"
+            )
+        else:
+            session.add_message("user", msg.content)
+            session.add_message("assistant", final_content)
+            self.sessions.save(session)
         
         return OutboundMessage(
             channel=msg.channel,
