@@ -394,14 +394,14 @@ class GyingUpdatesTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "category": {
+                "source": {
                     "type": "string",
-                    "enum": ["latest", "trending", "4k", "all"],
-                    "description": "Which listing page to check.",
+                    "enum": ["manual", "cron"],
+                    "description": "Trigger source: 'manual' returns all listings, 'cron' returns only unseen. Default: cron.",
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Max number of new movies to return.",
+                    "description": "Max number of movies to return (default 12).",
                 },
             },
             "required": [],
@@ -409,9 +409,20 @@ class GyingUpdatesTool(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         try:
-            max_results = kwargs.get("max_results", 10)
+            max_results = kwargs.get("max_results", 12)
+            source = kwargs.get("source", "cron")
             listing = await self._scrape_listing()
 
+            if source == "manual":
+                # Manual query: return all listings in original order, no seen filtering
+                movies = listing[:max_results]
+                return json.dumps({
+                    "movies": movies,
+                    "total": len(listing),
+                    "count": len(movies),
+                }, ensure_ascii=False)
+
+            # Cron mode: filter by seen, only return new items
             seen_data = self._load_seen()
             seen_urls = set(seen_data.get("movies", {}).keys())
 
