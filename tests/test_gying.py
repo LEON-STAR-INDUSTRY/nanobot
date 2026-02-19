@@ -288,11 +288,13 @@ async def test_gying_select_link_resolves_index():
     assert data["magnet"] == "magnet:?xt=urn:btih:bbb"
     assert data["name"] == "Movie.1080p.中字.mkv"
     assert data["quality_tab"] == "中字1080P"
+    assert data["index"] == 2
 
     # Select link 1 → should return 4K link
     result = await tool.execute(action="select_link", index=1)
     data = json.loads(result)
     assert data["magnet"] == "magnet:?xt=urn:btih:aaa"
+    assert data["index"] == 1
 
     Path(seen_path).unlink(missing_ok=True)
 

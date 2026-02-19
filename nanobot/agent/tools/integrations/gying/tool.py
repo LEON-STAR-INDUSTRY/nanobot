@@ -371,7 +371,7 @@ class GyingScraperTool(Tool):
             )
 
         link = links[index - 1]
-        return json.dumps(link, ensure_ascii=False)
+        return json.dumps({**link, "index": index}, ensure_ascii=False)
 
     # ------------------------------------------------------------------
     # Scraping methods
