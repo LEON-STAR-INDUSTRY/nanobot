@@ -196,15 +196,25 @@ class AgentLoop:
         # Agent loop
         iteration = 0
         final_content = None
-        
+
+        tool_names = self.tools.tool_names
+        logger.debug(f"Agent loop start: {len(tool_names)} tools registered: {tool_names}")
+
         while iteration < self.max_iterations:
             iteration += 1
-            
+
             # Call LLM
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
                 model=self.model
+            )
+
+            logger.debug(
+                f"LLM response (iter={iteration}): "
+                f"has_tool_calls={response.has_tool_calls}, "
+                f"finish_reason={response.finish_reason}, "
+                f"content_preview={repr(response.content[:100]) if response.content else 'None'}"
             )
             
             # Handle tool calls

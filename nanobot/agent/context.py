@@ -6,6 +6,8 @@ import platform
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
 
@@ -53,6 +55,7 @@ class ContextBuilder:
         # Skills - progressive loading
         # 1. Always-loaded skills: include full content
         always_skills = self.skills.get_always_skills()
+        logger.debug(f"Always-loaded skills: {always_skills}")
         if always_skills:
             always_content = self.skills.load_skills_for_context(always_skills)
             if always_content:
